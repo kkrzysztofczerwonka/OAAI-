@@ -20,6 +20,7 @@ function App() {
   const [view, setView] = useState<ViewState | "LOGIN" | "ADMIN">("IDLE");
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [username, setUsername] = useState<string | null>(localStorage.getItem("username"));
+  const [apiUrl, setApiUrl] = useState<string>(localStorage.getItem("apiUrl") || "http://localhost:8000");
   const [loginForm, setLoginForm] = useState({ user: "", pass: "" });
 
   const [isLocked, setIsLocked] = useState(false);
@@ -132,7 +133,7 @@ function App() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch("http://localhost:8000/api/login", {
+      const res = await fetch(`${apiUrl}/api/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: loginForm.user, password: loginForm.pass }),
@@ -141,6 +142,7 @@ function App() {
       if (res.ok) {
         localStorage.setItem("token", data.token);
         localStorage.setItem("username", data.username);
+        localStorage.setItem("apiUrl", apiUrl);
         setToken(data.token);
         setUsername(data.username);
         updateWindow("FORM");
@@ -169,7 +171,7 @@ function App() {
     formData.append("file", file);
 
     try {
-      const res = await fetch("http://localhost:8000/api/upload", {
+      const res = await fetch(`${apiUrl}/api/upload`, {
         method: "POST",
         headers: { "token": token || "" },
         body: formData,
@@ -180,7 +182,7 @@ function App() {
         // Start polling for progress
         const pollId = setInterval(async () => {
           try {
-            const sRes = await fetch(`http://localhost:8000/api/upload/status/${data.task_id}`);
+            const sRes = await fetch(`${apiUrl}/api/upload/status/${data.task_id}`);
             const sData = await sRes.json();
 
             setStatus(sData.status);
@@ -220,7 +222,7 @@ function App() {
     setIsQuerying(true);
 
     try {
-      const res = await fetch(`http://localhost:8000/api/query?q=${encodeURIComponent(userMessage)}`, {
+      const res = await fetch(`${apiUrl}/api/query?q=${encodeURIComponent(userMessage)}`, {
         headers: { "token": token || "" }
       });
       const data = await res.json();
@@ -245,7 +247,7 @@ function App() {
     if (!content.trim()) return;
     try {
       setStatus("Wysyłanie...");
-      const res = await fetch("http://localhost:8000/api/notes", {
+      const res = await fetch(`${apiUrl}/api/notes`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "token": token || "" },
         body: JSON.stringify({ title, content, image }),
@@ -521,6 +523,7 @@ function App() {
                 <h2>Witamy w ArcusAi</h2>
                 <p>Zaloguj się do swojego konta</p>
                 <form onSubmit={handleLogin} className="login-form">
+                  <input type="text" placeholder="Adres API (np. http://localhost:8000)" value={apiUrl} onChange={e => setApiUrl(e.target.value)} required />
                   <input type="text" placeholder="Użytkownik" value={loginForm.user} onChange={e => setLoginForm({ ...loginForm, user: e.target.value })} required />
                   <input type="password" placeholder="Hasło" value={loginForm.pass} onChange={e => setLoginForm({ ...loginForm, pass: e.target.value })} required />
                   <button type="submit" className="submit-btn login-btn">Zaloguj</button>

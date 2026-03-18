@@ -13,6 +13,7 @@ import chromadb
 from dotenv import load_dotenv
 import jwt
 import bcrypt
+import asyncio
 
 # Load .env file
 load_dotenv()
@@ -321,22 +322,26 @@ upload_tasks = {}
 async def get_upload_status(task_id: str):
     return upload_tasks.get(task_id, {"status": "Not found", "done": False})
 
+# Helper function to split text into chunks
+def split_text(text, chunk_size=8000):
+    if not text: return []
+    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
 async def process_file_task(task_id: str, file_path: str, original_filename: str):
     ext = os.path.splitext(original_filename)[1].lower()
     summary = ""
     processed_files = []
     
     try:
+        print(f"[TASK] Rozpoczęcie: {original_filename}")
         global collection
         collection = chroma_client.get_or_create_collection(name="knowledge_base")
 
         if ext == ".zip":
             upload_tasks[task_id] = {"status": "Wypakowywanie...", "done": False}
             with tempfile.TemporaryDirectory() as tmpdir:
-                # Re-save to temp for zip processing
                 temp_zip = os.path.join(tmpdir, "archive.zip")
                 shutil.copy(file_path, temp_zip)
-                
                 with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
                     zip_ref.extractall(tmpdir)
                     
@@ -347,51 +352,62 @@ async def process_file_task(task_id: str, file_path: str, original_filename: str
                         rel_path = os.path.relpath(f_path, tmpdir)
                         f_ext = os.path.splitext(f_name)[1].lower()
                         
-                        upload_tasks[task_id] = {"status": f"Indeksowanie: {rel_path}", "done": False}
                         text = extract_text(f_path, f_ext)
                         if text.strip() and GEMINI_API_KEY:
-                            try:
-                                doc_id = f"{original_filename}/{rel_path}"
-                                res = genai.embed_content(model="models/gemini-embedding-001", content=text, task_type="retrieval_document")
+                            chunks = split_text(text)
+                            batch_size = 50
+                            for j in range(0, len(chunks), batch_size):
+                                batch = chunks[j:j+batch_size]
+                                upload_tasks[task_id] = {"status": f"Indeksowanie ZIP: {rel_path} ({j//batch_size + 1}/{(len(chunks)+batch_size-1)//batch_size})", "done": False}
+                                res = genai.embed_content(model="models/gemini-embedding-001", content=batch, task_type="retrieval_document")
                                 collection.upsert(
-                                    embeddings=[res['embedding']], 
-                                    documents=[text], 
-                                    metadatas=[{"filename": rel_path, "source_zip": original_filename, "type": f_ext}], 
-                                    ids=[doc_id]
+                                    embeddings=res['embedding'], 
+                                    documents=batch, 
+                                    metadatas=[{"filename": rel_path, "source_zip": original_filename, "type": f_ext, "chunk": j+k} for k in range(len(batch))], 
+                                    ids=[f"{original_filename}/{rel_path}_chunk_{j+k}" for k in range(len(batch))]
                                 )
-                                processed_files.append(rel_path)
-                            except: pass
-                
-                if processed_files and GEMINI_API_KEY:
-                    upload_tasks[task_id] = {"status": "Generowanie podsumowania...", "done": False}
-                    model = genai.GenerativeModel('models/gemini-flash-latest')
-                    summary_prompt = f"Podsumuj krótko (maksymalnie 3 zdania) zawartość archiwum ZIP '{original_filename}', które zawiera pliki: {', '.join(processed_files[:10])}. Co to za projekt?"
-                    summary = model.generate_content(summary_prompt).text
+                                await asyncio.sleep(1) # Rate limit safety
+                            processed_files.append(rel_path)
         else:
-            upload_tasks[task_id] = {"status": f"Indeksowanie: {original_filename}", "done": False}
             text = extract_text(file_path, ext)
             if text.strip() and GEMINI_API_KEY:
-                res = genai.embed_content(model="models/gemini-embedding-001", content=text, task_type="retrieval_document")
-                collection.upsert(
-                    embeddings=[res['embedding']], 
-                    documents=[text], 
-                    metadatas=[{"filename": original_filename, "type": ext}], 
-                    ids=[original_filename]
-                )
+                chunks = split_text(text)
+                total_chunks = len(chunks)
+                batch_size = 50
+                total_batches = (total_chunks + batch_size - 1) // batch_size
+                print(f"[TASK] Plik {original_filename} podzielony na {total_chunks} fragmentów ({total_batches} paczek)")
+                
+                for i in range(0, total_chunks, batch_size):
+                    batch = chunks[i:i + batch_size]
+                    current_batch = i // batch_size + 1
+                    upload_tasks[task_id] = {"status": f"Indeksowanie paczki {current_batch}/{total_batches}", "done": False}
+                    print(f"[TASK] Wysyłanie paczki {current_batch}/{total_batches} do Gemini...")
+                    
+                    try:
+                        res = genai.embed_content(model="models/gemini-embedding-001", content=batch, task_type="retrieval_document")
+                        collection.upsert(
+                            embeddings=res['embedding'], 
+                            documents=batch, 
+                            metadatas=[{"filename": original_filename, "type": ext, "chunk": i+k} for k in range(len(batch))], 
+                            ids=[f"{original_filename}_chunk_{i+k}" for k in range(len(batch))]
+                        )
+                        await asyncio.sleep(1) # Rate limit safety
+                    except Exception as be:
+                        print(f"[BATCH ERROR] {str(be)}")
+                        if "429" in str(be):
+                            await asyncio.sleep(10) # Longer wait on quota error
                 
                 upload_tasks[task_id] = {"status": "Generowanie podsumowania...", "done": False}
                 model = genai.GenerativeModel('models/gemini-flash-latest')
-                summary_prompt = f"Podsumuj krótko w 2 zdaniach plik '{original_filename}':\n\n{text[:2000]}"
+                summary_prompt = f"Podsumuj krótko w 2 zdaniach plik '{original_filename}':\n\n{text[:3000]}"
                 summary = model.generate_content(summary_prompt).text
 
-        upload_tasks[task_id] = {
-            "status": "Zakończono pomyślnie", 
-            "done": True, 
-            "summary": summary, 
-            "files": processed_files
-        }
+        upload_tasks[task_id] = { "status": "Zakończono pomyślnie", "done": True, "summary": summary, "files": processed_files }
+        print(f"[TASK] Sukces: {original_filename}")
     except Exception as e:
-        upload_tasks[task_id] = {"status": f"Błąd w zadaniu: {str(e)}", "done": True, "error": True}
+        print(f"[TASK ERROR] {str(e)}")
+        upload_tasks[task_id] = {"status": f"Błąd: {str(e)}", "done": True, "error": True}
+
 
 @app.post("/api/upload")
 async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):

@@ -6,7 +6,7 @@ use arboard::Clipboard;
 #[tauri::command]
 async fn take_screenshot(
     window: Window, 
-    area: Option<serde_json::Value>
+    _area: Option<serde_json::Value>
 ) -> Result<String, String> {
     // 1. Hide the window to get it out of the screenshot
     window.hide().map_err(|e| e.to_string())?;
@@ -14,7 +14,7 @@ async fn take_screenshot(
     // 2. Define temp file path correctly for the OS
     let mut temp_path = std::env::temp_dir();
     temp_path.push("arcus_screenshot.png");
-    let _temp_str = temp_path.to_str().ok_or("Błąd ścieżki tymczasowej")?;
+    let temp_str = temp_path.to_str().ok_or("Błąd ścieżki tymczasowej")?;
 
     if temp_path.exists() {
         let _ = fs::remove_file(&temp_path);
@@ -58,7 +58,7 @@ async fn take_screenshot(
             let mut image = screen.capture().map_err(|e| e.to_string())?;
             
             // If area is provided, crop the image
-            if let Some(area_val) = area {
+            if let Some(area_val) = _area {
                 let x = area_val["x"].as_i64().unwrap_or(0) as u32;
                 let y = area_val["y"].as_i64().unwrap_or(0) as u32;
                 let w = area_val["width"].as_i64().unwrap_or(image.width() as i64) as u32;
