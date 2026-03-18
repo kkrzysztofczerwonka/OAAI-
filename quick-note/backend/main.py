@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -116,12 +117,25 @@ def init_db():
     if "user_id" not in columns:
         cursor.execute("ALTER TABLE notes ADD COLUMN user_id INTEGER DEFAULT 1")
         
-    # Seed Admin if not exists
-    cursor.execute("SELECT * FROM users WHERE username = 'Admin'")
-    if not cursor.fetchone():
+    # Seed/Update Admin
+    cursor.execute("SELECT id FROM users WHERE username = 'Admin'")
+    admin_user = cursor.fetchone()
+    if not admin_user:
         admin_pass = get_password_hash("Leopard12@")
         cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
                        ("Admin", admin_pass, "admin"))
+    else:
+        # Force admin role for existing Admin user
+        cursor.execute("UPDATE users SET role = 'admin' WHERE username = 'Admin'")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            color TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
                        
     conn.commit()
     conn.close()
@@ -180,6 +194,7 @@ async def create_note(note: Note, user=Depends(get_current_user)):
     if not note.content.strip():
         raise HTTPException(status_code=400, detail="Content cannot be empty")
     try:
+        # 1. Save to SQLite
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("INSERT INTO notes (title, content, image, user_id) VALUES (?, ?, ?, ?)", 
@@ -187,9 +202,32 @@ async def create_note(note: Note, user=Depends(get_current_user)):
         note_id = cursor.lastrowid
         conn.commit()
         conn.close()
+        
+        # 2. Index in ChromaDB (RAG)
+        if GEMINI_API_KEY:
+            try:
+                # Combine title and content for better context
+                full_text = f"Tytuł: {note.title}\nAutor: {user['username'] if user else 'System'}\nTreść: {note.content}"
+                res = genai.embed_content(
+                    model="models/gemini-embedding-001",
+                    content=full_text,
+                    task_type="retrieval_document"
+                )
+                
+                collection.upsert(
+                    embeddings=[res['embedding']],
+                    documents=[full_text],
+                    metadatas=[{"type": "note", "id": str(note_id), "title": note.title, "author": user['username'] if user else 'System'}],
+                    ids=[f"note_{note_id}"]
+                )
+                print(f"[INDEX] Note {note_id} indexed in ChromaDB")
+            except Exception as e:
+                print(f"[INDEX ERROR] Failed to index note: {str(e)}")
+
         return {"id": note_id, "success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/notes")
 async def get_notes(user=Depends(get_current_user)):
@@ -198,13 +236,24 @@ async def get_notes(user=Depends(get_current_user)):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         if user and user["role"] == "admin":
-            cursor.execute("SELECT id, title, content, image, created_at FROM notes ORDER BY created_at DESC")
+            cursor.execute("""
+                SELECT n.id, n.title, n.content, n.image, n.created_at, u.username
+                FROM notes n
+                JOIN users u ON n.user_id = u.id
+                ORDER BY n.created_at DESC
+            """)
         else:
-            cursor.execute("SELECT id, title, content, image, created_at FROM notes WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+            cursor.execute("""
+                SELECT n.id, n.title, n.content, n.image, n.created_at, u.username
+                FROM notes n
+                JOIN users u ON n.user_id = u.id
+                WHERE n.user_id = ?
+                ORDER BY n.created_at DESC
+            """, (user_id,))
         
         notes = cursor.fetchall()
         conn.close()
-        return [{"id": n[0], "title": n[1], "content": n[2], "image": n[3], "created_at": n[4]} for n in notes]
+        return [{"id": n[0], "title": n[1], "content": n[2], "image": n[3], "created_at": n[4], "author": n[5]} for n in notes]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -233,7 +282,16 @@ async def query_knowledge(q: str, user=Depends(get_current_user)):
         if not results['documents'] or not results['documents'][0]:
             return {"answer": "Nie znalazłem precyzyjnych informacji w bazie, ale spróbuję odpowiedzieć z własnej wiedzy.", "sources": []}
 
-        context = "\n".join(results['documents'][0])
+        # Format context with labels and authors
+        ctx_list = []
+        if results['documents'] and results['documents'][0]:
+            for i, doc in enumerate(results['documents'][0]):
+                meta = results['metadatas'][0][i]
+                labels = meta.get('labels', '')
+                author = meta.get('author', 'System')
+                ctx_list.append(f"[Źródło: {meta.get('filename','Notatka')}, Autor: {author}, Etykiety: {labels}]\n{doc}")
+                
+        context = "\n---\n".join(ctx_list)
         
         # --- OPCJA 1: GOOGLE GEMINI (Z LIMITAMI) ---
         # Przywracam model 2.5 Flash zgodnie z prośbą użytkownika
@@ -248,6 +306,16 @@ async def query_knowledge(q: str, user=Depends(get_current_user)):
         sources = []
         if results.get('metadatas') and results['metadatas'][0]:
             sources = results['metadatas'][0]
+
+        # Log query for admin
+        try:
+            user_id = user["id"] if user else 1
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO query_logs (user_id, query) VALUES (?, ?)", (user_id, q))
+            conn.commit()
+            conn.close()
+        except: pass
 
         return {"answer": answer, "sources": sources}
     except Exception as e:
@@ -293,6 +361,74 @@ async def get_stats(user=Depends(get_current_user)):
             
     return [{"username": k, "notes": v["notes"], "queries": v["queries"]} for k, v in stats.items()]
 
+@app.get("/api/admin/logs")
+async def get_admin_logs(user=Depends(get_current_user)):
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Tylko dla Admina")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT q.id, u.username, q.query, q.created_at 
+        FROM query_logs q 
+        JOIN users u ON q.user_id = u.id 
+        ORDER BY q.created_at DESC LIMIT 50
+    """)
+    logs = cursor.fetchall()
+    conn.close()
+    return [{"id": l[0], "username": l[1], "query": l[2], "created_at": l[3]} for l in logs]
+
+@app.get("/api/admin/kb")
+async def get_admin_kb(page: int = 1, size: int = 10, user=Depends(get_current_user)):
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Tylko dla Admina")
+    try:
+        # Get all IDs first to count total
+        res_all = collection.get(include=[])
+        total = len(res_all['ids'])
+        
+        # Get paginated slice (ChromaDB doesn't have direct skip/limit in .get() easily 
+        # for all scenarios, but we can simulate or use include)
+        offset = (page - 1) * size
+        
+        # In this chroma version, we might fetch IDs and slice them
+        target_ids = res_all['ids'][offset : offset + size]
+        
+        if not target_ids:
+            return {"items": [], "total": total}
+
+        res = collection.get(ids=target_ids, include=['metadatas'])
+        items = []
+        for i in range(len(res['ids'])):
+            items.append({
+                "id": res['ids'][i],
+                "metadata": res['metadatas'][i]
+            })
+        return {"items": items, "total": total}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/kb/{chunk_id}")
+async def get_chunk_content(chunk_id: str, user=Depends(get_current_user)):
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Tylko dla Admina")
+    try:
+        res = collection.get(ids=[chunk_id], include=['documents'])
+        if res['documents']:
+            return {"content": res['documents'][0]}
+        raise HTTPException(status_code=404, detail="Not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/kb/{chunk_id}")
+async def delete_admin_kb_chunk(chunk_id: str, user=Depends(get_current_user)):
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Tylko dla Admina")
+    try:
+        collection.delete(ids=[chunk_id])
+        return {"success": True, "message": f"Chunk {chunk_id} deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/admin/users")
 async def create_new_user(new_user: UserCreate, user=Depends(get_current_user)):
     if not user or user["role"] != "admin":
@@ -317,6 +453,77 @@ from fastapi import BackgroundTasks
 
 # Store task status
 upload_tasks = {}
+
+@app.get("/api/admin/users")
+async def get_all_users(user=Depends(get_current_user)):
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Tylko dla Admina")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT u.username, u.role, u.created_at, COUNT(n.id) as note_count 
+        FROM users u
+        LEFT JOIN notes n ON u.id = n.user_id
+        GROUP BY u.id
+    """)
+    users = [{"username": r[0], "role": r[1], "created_at": r[2], "note_count": r[3]} for r in cursor.fetchall()]
+    conn.close()
+    return users
+
+@app.patch("/api/admin/kb/{chunk_id}/metadata")
+async def update_kb_metadata(chunk_id: str, patch: dict, user=Depends(get_current_user)):
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Tylko dla Admina")
+    try:
+        # Get existing metadata
+        res = collection.get(ids=[chunk_id], include=['metadatas'])
+        if not res['metadatas']:
+            raise HTTPException(status_code=404, detail="Not found")
+            
+        current_meta = res['metadatas'][0]
+        # Merge patch into current_meta
+        for k, v in patch.items():
+            current_meta[k] = v
+            
+        collection.update(ids=[chunk_id], metadatas=[current_meta])
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/labels")
+async def get_labels(user=Depends(get_current_user)):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, color FROM labels")
+    labels = [{"name": r[0], "color": r[1]} for r in cursor.fetchall()]
+    conn.close()
+    return labels
+
+@app.post("/api/admin/labels")
+async def add_label(label: dict, user=Depends(get_current_user)):
+    if not user or user["role"] != "admin": raise HTTPException(status_code=403)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO labels (name, color) VALUES (?, ?)", (label["name"], label.get("color", "#2563eb")))
+        conn.commit()
+    except: pass
+    conn.close()
+    return {"success": True}
+
+@app.delete("/api/admin/users/{username}")
+async def delete_user(username: str, user=Depends(get_current_user)):
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Tylko dla Admina")
+    if username == "Admin":
+        raise HTTPException(status_code=400, detail="Nie można usunąć głównego konta Admin")
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
 
 @app.get("/api/upload/status/{task_id}")
 async def get_upload_status(task_id: str):
@@ -438,6 +645,15 @@ def extract_text(fp, ext):
     except:
         pass
     return ""
+
+
+# Serve Admin Panel static files
+ADMIN_DIST_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "admin-panel", "dist")
+if os.path.exists(ADMIN_DIST_PATH):
+    app.mount("/admin", StaticFiles(directory=ADMIN_DIST_PATH, html=True), name="admin")
+    print(f"[SERVER] Admin panel mounted at /admin (from {ADMIN_DIST_PATH})")
+else:
+    print(f"[WARNING] Admin dist folder not found at {ADMIN_DIST_PATH}. Build it with 'npm run build' in admin-panel folder.")
 
 if __name__ == "__main__":
     import uvicorn
