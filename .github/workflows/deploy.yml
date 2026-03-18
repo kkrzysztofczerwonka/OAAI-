@@ -27,23 +27,66 @@ jobs:
           npm install
           npm run build
 
+      # --------------------------------------------------------------
+      # NEW STEP – Install backend Python dependencies (if needed)
+      # --------------------------------------------------------------
+      - name: Install Backend Dependencies
+        shell: powershell
+        run: |
+          $targetDir = "C:/inetpub/arcusAI"
+          $backendDir = "$targetDir/backend"
+
+          # Ensure a virtual environment exists
+          if (!(Test-Path "$backendDir/venv")) {
+            Write-Host "Creating virtual environment..."
+            python -m venv "$backendDir/venv"
+          }
+
+          # Activate venv and install requirements
+          & "$backendDir/venv/Scripts/Activate.ps1"
+          if (Test-Path "$backendDir/requirements.txt") {
+            Write-Host "Installing Python packages from requirements.txt..."
+            pip install --upgrade pip
+            pip install -r "$backendDir/requirements.txt"
+          } else {
+            Write-Warning "requirements.txt not found – skipping pip install."
+          }
+
+          # Copy .env if it exists in the repo (it is ignored by git, so we ship it manually)
+          if (Test-Path "quick-note/backend/.env") {
+            Copy-Item -Path "quick-note/backend/.env" -Destination "$backendDir/.env" -Force
+          } else {
+            Write-Warning ".env not found in repo – ensure it exists on the server."
+          }
+
       - name: Deploy Files
         shell: powershell
         run: |
           $targetDir = "C:/inetpub/arcusAI"
-          
-          # Podstawowe foldery
+
+          # Basic folders
           if (!(Test-Path "$targetDir")) { New-Item -ItemType Directory -Force -Path "$targetDir" }
           if (!(Test-Path "$targetDir/backend")) { New-Item -ItemType Directory -Force -Path "$targetDir/backend" }
           if (!(Test-Path "$targetDir/admin-panel/dist")) { New-Item -ItemType Directory -Force -Path "$targetDir/admin-panel/dist" }
 
-          # 1. Backend (cały folder z .bat i innymi plikami)
+          # 1. Backend (copy all files, including .bat and scripts)
           Copy-Item -Path "quick-note/backend/*" -Destination "$targetDir/backend/" -Recurse -Force
-          
+
           # 2. Admin Panel
           Remove-Item -Path "$targetDir/admin-panel/dist/*" -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item -Path "quick-note/admin-panel/dist/*" -Destination "$targetDir/admin-panel/dist" -Recurse -Force
-          
+
+          # --------------------------------------------------------------
+          # NEW STEP – Ensure a static server serves the admin panel
+          # --------------------------------------------------------------
+          $adminDist = "$targetDir/admin-panel/dist"
+          if (Test-Path "$adminDist/index.html") {
+            Write-Host "Starting fallback static HTTP server on port 8080..."
+            Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -Command `cd '$adminDist'; python -m http.server 8080`" -WindowStyle Hidden
+          } else {
+            Write-Warning "Admin panel dist folder is empty – check the build step."
+          }
+
           Write-Host "Deployment done."
 
       - name: Restart Backend
@@ -52,7 +95,7 @@ jobs:
           # Kill python processes
           $procs = Get-Process python -ErrorAction SilentlyContinue 
           if ($procs) { $procs | Stop-Process -Force }
-          
+
           # Run bat
           Start-Process -FilePath "C:/inetpub/arcusAI/backend/run_windows.bat" -WorkingDirectory "C:/inetpub/arcusAI/backend" -WindowStyle Hidden
           Write-Host "Restarted."
