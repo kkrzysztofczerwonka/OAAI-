@@ -6,42 +6,52 @@ on:
 
 jobs:
   deploy:
-    runs-on: self-hosted  # Musisz zainstalować GitHub Runner na serwerze!
+    runs-on: self-hosted
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Debug Info
+        shell: pwsh
+        run: |
+          pwd
+          dir
+          dir quick-note
 
       - name: Build Admin Panel
+        shell: pwsh
         run: |
           cd quick-note/admin-panel
           npm install
           npm run build
 
-      - name: Deploy Backend & Admin Panel
+      - name: Deploy Files
         shell: pwsh
         run: |
           $targetDir = "C:/inetpub/arcusAI"
           
-          # 1. Kopiowanie backendu (main.py)
+          # Podstawowe foldery
+          if (!(Test-Path "$targetDir")) { New-Item -ItemType Directory -Force -Path "$targetDir" }
+          if (!(Test-Path "$targetDir/backend")) { New-Item -ItemType Directory -Force -Path "$targetDir/backend" }
+          if (!(Test-Path "$targetDir/admin-panel/dist")) { New-Item -ItemType Directory -Force -Path "$targetDir/admin-panel/dist" }
+
+          # 1. Backend
           Copy-Item -Path "quick-note/backend/main.py" -Destination "$targetDir/backend/main.py" -Force
           
-          # 2. Aktualizacja Admin Panel (dist)
-          if (Test-Path "$targetDir/admin-panel/dist") {
-            Remove-Item -Path "$targetDir/admin-panel/dist" -Recurse -Force
-          }
-          New-Item -ItemType Directory -Force -Path "$targetDir/admin-panel/dist"
+          # 2. Admin Panel
+          Remove-Item -Path "$targetDir/admin-panel/dist/*" -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item -Path "quick-note/admin-panel/dist/*" -Destination "$targetDir/admin-panel/dist" -Recurse -Force
           
-          Write-Host "Deployment completed successfully to $targetDir"
+          Write-Host "Deployment done."
 
-      - name: Restart ArcusAI Backend
+      - name: Restart Backend
         shell: pwsh
         run: |
-          # Zamykanie poprzednich instancji Pythona i Uvicorn
-          Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+          # Kill python processes
+          $procs = Get-Process python -ErrorAction SilentlyContinue 
+          if ($procs) { $procs | Stop-Process -Force }
           
-          # Uruchamianie backendu z run_windows.bat w tle
+          # Run bat
           Start-Process -FilePath "C:/inetpub/arcusAI/backend/run_windows.bat" -WorkingDirectory "C:/inetpub/arcusAI/backend" -WindowStyle Hidden
-          
-          Write-Host "Backend restarted successfully"
+          Write-Host "Restarted."
