@@ -4,6 +4,7 @@ echo [%date% %time%] === ArcusAI Windows Backend Service ===
 
 :: Change to backend directory if not already there
 cd /d "%~dp0"
+call "%~dp0venv\Scripts\activate.bat"
 
 echo [%date% %time%] [+] Sprawdzanie czy backend moze wystartowac...
 python -c "import fastapi; import uvicorn" >nul 2>&1
