@@ -13,21 +13,21 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Debug Info
-        shell: pwsh
+        shell: powershell
         run: |
           pwd
           dir
           dir quick-note
 
       - name: Build Admin Panel
-        shell: pwsh
+        shell: powershell
         run: |
           cd quick-note/admin-panel
           npm install
           npm run build
 
       - name: Deploy Files
-        shell: pwsh
+        shell: powershell
         run: |
           $targetDir = "C:/inetpub/arcusAI"
           
@@ -46,7 +46,7 @@ jobs:
           Write-Host "Deployment done."
 
       - name: Restart Backend
-        shell: pwsh
+        shell: powershell
         run: |
           # Kill python processes
           $procs = Get-Process python -ErrorAction SilentlyContinue 
