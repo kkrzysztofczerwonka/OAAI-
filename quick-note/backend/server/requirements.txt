@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+google-generativeai
+pypdf
+python-docx
+chromadb
+python-multipart
+pyjwt
+bcrypt
