@@ -19,7 +19,7 @@ jobs:
 
       - name: Build Admin Panel
         run: |
-          cd admin-panel
+          cd quick-note/admin-panel
           npm install
           npm run build
 
@@ -29,14 +29,14 @@ jobs:
           $targetDir = "C:/inetpub/arcusAI"
           
           # 1. Kopiowanie backendu (main.py)
-          Copy-Item -Path "backend/main.py" -Destination "$targetDir/backend/main.py" -Force
+          Copy-Item -Path "quick-note/backend/main.py" -Destination "$targetDir/backend/main.py" -Force
           
           # 2. Aktualizacja Admin Panel (dist)
           if (Test-Path "$targetDir/admin-panel/dist") {
             Remove-Item -Path "$targetDir/admin-panel/dist" -Recurse -Force
           }
           New-Item -ItemType Directory -Force -Path "$targetDir/admin-panel/dist"
-          Copy-Item -Path "admin-panel/dist/*" -Destination "$targetDir/admin-panel/dist" -Recurse -Force
+          Copy-Item -Path "quick-note/admin-panel/dist/*" -Destination "$targetDir/admin-panel/dist" -Recurse -Force
           
           Write-Host "Deployment completed successfully to $targetDir"
 
