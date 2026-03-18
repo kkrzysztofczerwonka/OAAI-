@@ -1,4 +1,4 @@
-# Triggering new deploy after Node.js update on Windows server
+# Triggering new deploy - full backend copy
 name: ArcusAI CI/CD Deployment
 
 on:
@@ -37,8 +37,8 @@ jobs:
           if (!(Test-Path "$targetDir/backend")) { New-Item -ItemType Directory -Force -Path "$targetDir/backend" }
           if (!(Test-Path "$targetDir/admin-panel/dist")) { New-Item -ItemType Directory -Force -Path "$targetDir/admin-panel/dist" }
 
-          # 1. Backend
-          Copy-Item -Path "quick-note/backend/main.py" -Destination "$targetDir/backend/main.py" -Force
+          # 1. Backend (cały folder z .bat i innymi plikami)
+          Copy-Item -Path "quick-note/backend/*" -Destination "$targetDir/backend/" -Recurse -Force
           
           # 2. Admin Panel
           Remove-Item -Path "$targetDir/admin-panel/dist/*" -Recurse -Force -ErrorAction SilentlyContinue
