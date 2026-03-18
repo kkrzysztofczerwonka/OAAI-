@@ -1,0 +1,52 @@
+name: ArcusAI CI/CD Deployment
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: self-hosted  # Musisz zainstalować GitHub Runner na serwerze!
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Build Admin Panel
+        run: |
+          cd admin-panel
+          npm install
+          npm run build
+
+      - name: Deploy Backend & Admin Panel
+        shell: pwsh
+        run: |
+          $targetDir = "C:/inetpub/arcusAI"
+          
+          # 1. Kopiowanie backendu (main.py)
+          Copy-Item -Path "backend/main.py" -Destination "$targetDir/backend/main.py" -Force
+          
+          # 2. Aktualizacja Admin Panel (dist)
+          if (Test-Path "$targetDir/admin-panel/dist") {
+            Remove-Item -Path "$targetDir/admin-panel/dist" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path "$targetDir/admin-panel/dist"
+          Copy-Item -Path "admin-panel/dist/*" -Destination "$targetDir/admin-panel/dist" -Recurse -Force
+          
+          Write-Host "Deployment completed successfully to $targetDir"
+
+      - name: Restart ArcusAI Backend
+        shell: pwsh
+        run: |
+          # Zamykanie poprzednich instancji Pythona i Uvicorn
+          Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+          
+          # Uruchamianie backendu z run_windows.bat w tle
+          Start-Process -FilePath "C:/inetpub/arcusAI/backend/run_windows.bat" -WorkingDirectory "C:/inetpub/arcusAI/backend" -WindowStyle Hidden
+          
+          Write-Host "Backend restarted successfully"
