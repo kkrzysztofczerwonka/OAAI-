@@ -21,6 +21,12 @@ pip install uvicorn gunicorn
 # Run interactive setup
 python3 setup.py
 
+# Run BookStack initialization
+if [ -f .env ]; then
+    echo "Inicjalizacja BookStack..."
+    python3 init_bookstack.py
+fi
+
 # Create SystemD Service
 SERVICE_FILE="/etc/systemd/system/arcus-ai.service"
 

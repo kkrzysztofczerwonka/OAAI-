@@ -9,3 +9,4 @@ chromadb
 python-multipart
 pyjwt
 bcrypt
+requests

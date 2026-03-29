@@ -3,8 +3,19 @@ import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 import { useEditor, EditorContent } from '@tiptap/react';
-import StarterKit from '@tiptap/starter-kit';
-import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
+import { StarterKit } from '@tiptap/starter-kit';
+import { CodeBlockLowlight } from '@tiptap/extension-code-block-lowlight';
+import { Placeholder } from '@tiptap/extension-placeholder';
+import { Underline } from '@tiptap/extension-underline';
+import { TextAlign } from '@tiptap/extension-text-align';
+import { Image } from '@tiptap/extension-image';
+import { Table } from '@tiptap/extension-table';
+import { TableRow } from '@tiptap/extension-table-row';
+import { TableCell } from '@tiptap/extension-table-cell';
+import { TableHeader } from '@tiptap/extension-table-header';
+import { Link } from '@tiptap/extension-link';
+import { TaskList } from '@tiptap/extension-task-list';
+import { TaskItem } from '@tiptap/extension-task-item';
 import { common, createLowlight } from 'lowlight';
 import logo from "./assets/logo.png";
 import { useRef } from 'react';
@@ -32,6 +43,22 @@ function App() {
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'ai', text: string, sources?: any[] }[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [isQuerying, setIsQuerying] = useState(false);
+  const [noteData, setNoteData] = useState({
+    rozwiazanie: "",
+    podrozwiazanie: "",
+    produkt: "",
+    obszar: "",
+    firma: "",
+    book_id: null as number | null,
+    chapter_id: null as number | null,
+    ksiazka_nazwa: "",
+    rozdzial_nazwa: ""
+  });
+  const [priority, setPriority] = useState<number>(0);
+  const [isFormVisible, setIsFormVisible] = useState(false);
+  const [isSuggesting, setIsSuggesting] = useState(false);
+  const [currentConversationId, setCurrentConversationId] = useState<number | null>(null);
+  const [recentConversations, setRecentConversations] = useState<{ id: number, title: string }[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -44,11 +71,41 @@ function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
 
+  const fetchRecentConversations = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${apiUrl}/api/conversations`, {
+        headers: { "token": token }
+      });
+      const data = await res.json();
+      if (res.ok) setRecentConversations(data);
+    } catch (e) { console.error(e); }
+  };
+
+  useEffect(() => {
+    if (view === "INFO") fetchRecentConversations();
+  }, [view, token]);
+
   const editor = useEditor({
     extensions: [
-      StarterKit,
-      CodeBlockLowlight.configure({
-        lowlight,
+      StarterKit.configure({
+        bulletList: {},
+        orderedList: {},
+        heading: { levels: [2, 3, 4, 5] },
+      }),
+      Underline,
+      TextAlign.configure({ types: ['heading', 'paragraph'] }),
+      Image.configure({ inline: true, allowBase64: true }),
+      Table.configure({ resizable: true }),
+      TableRow,
+      TableHeader,
+      TableCell,
+      Link.configure({ openOnClick: false }),
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      CodeBlockLowlight.configure({ lowlight }),
+      Placeholder.configure({
+        placeholder: 'Zacznij pisać...',
       }),
     ],
     content: '',
@@ -61,9 +118,12 @@ function App() {
     try {
       try {
         const b64Image = await invoke<string>("read_clipboard_image");
-        setImage(b64Image);
+        if (editor && b64Image) {
+          editor.chain().focus().setImage({ src: b64Image }).run();
+        } else {
+          setImage(b64Image);
+        }
       } catch (e) {
-        // If no image, try reading text
         const clipboardText = await navigator.clipboard.readText();
         if (clipboardText && editor) {
           editor.chain().focus().insertContent(clipboardText).run();
@@ -119,15 +179,37 @@ function App() {
     setTimeout(() => setIsLocked(false), 1000);
   };
 
-  const handleFormat = (type: 'bold' | 'sql' | 'csharp') => {
+  const handleFormat = (type: string, value?: any) => {
     if (!editor) return;
-    if (type === 'bold') {
-      editor.chain().focus().toggleBold().run();
-    } else if (type === 'sql') {
-      editor.chain().focus().toggleCodeBlock({ language: 'sql' }).run();
-    } else if (type === 'csharp') {
-      editor.chain().focus().toggleCodeBlock({ language: 'csharp' }).run();
+    const chain = editor.chain().focus();
+
+    switch (type) {
+      case 'bold': chain.toggleBold().run(); break;
+      case 'italic': chain.toggleItalic().run(); break;
+      case 'underline': chain.toggleUnderline().run(); break;
+      case 'strike': chain.toggleStrike().run(); break;
+      case 'h2': chain.toggleHeading({ level: 2 }).run(); break;
+      case 'h3': chain.toggleHeading({ level: 3 }).run(); break;
+      case 'bulletList': chain.toggleBulletList().run(); break;
+      case 'orderedList': chain.toggleOrderedList().run(); break;
+      case 'taskList': chain.toggleTaskList().run(); break;
+      case 'alignLeft': chain.setTextAlign('left').run(); break;
+      case 'alignCenter': chain.setTextAlign('center').run(); break;
+      case 'alignRight': chain.setTextAlign('right').run(); break;
+      case 'table': chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(); break;
+      case 'hr': chain.setHorizontalRule().run(); break;
+      case 'codeBlock':
+        if (value) chain.toggleCodeBlock({ language: value }).run();
+        break;
+      case 'sql': chain.toggleCodeBlock({ language: 'sql' }).run(); break;
+      case 'csharp': chain.toggleCodeBlock({ language: 'csharp' }).run(); break;
     }
+  };
+
+  const setCallout = (_type: 'info' | 'success' | 'warning' | 'danger') => {
+    if (!editor) return;
+    // For now using blockquote as a generic callout
+    editor.chain().focus().toggleBlockquote().run();
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -216,14 +298,27 @@ function App() {
   const handleQuery = async () => {
     if (!query.trim()) return;
 
-    const userMessage = query;
-    setChatMessages(prev => [...prev, { role: 'user', text: userMessage }]);
+    const userMessage = { role: 'user' as const, text: query };
+    const currentHistory = [...chatMessages, userMessage];
+
+    setChatMessages(currentHistory);
     setQuery("");
     setIsQuerying(true);
 
     try {
-      const res = await fetch(`${apiUrl}/api/query?q=${encodeURIComponent(userMessage)}`, {
-        headers: { "token": token || "" }
+      const res = await fetch(`${apiUrl}/api/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "token": token || ""
+        },
+        body: JSON.stringify({
+          messages: currentHistory.map(m => ({
+            role: m.role,
+            content: m.text
+          })),
+          conversation_id: currentConversationId
+        })
       });
       const data = await res.json();
       if (data.answer) {
@@ -232,6 +327,10 @@ function App() {
           text: data.answer,
           sources: data.sources
         }]);
+        if (data.conversation_id) {
+          setCurrentConversationId(data.conversation_id);
+          fetchRecentConversations();
+        }
       } else if (data.error) {
         setChatMessages(prev => [...prev, { role: 'ai', text: `Błąd: ${data.error}` }]);
       }
@@ -242,21 +341,83 @@ function App() {
     }
   };
 
+  const handleSuggest = async () => {
+    if (!content.trim() || isSuggesting) return;
+    setIsSuggesting(true);
+    try {
+      const res = await fetch(`${apiUrl}/api/suggest-metadata`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "token": token || ""
+        },
+        body: JSON.stringify({ content: editor?.getText() || content })
+      });
+      const data = await res.json();
+      if (data && !data.error) {
+        setNoteData({
+          rozwiazanie: data.rozwiazanie || "",
+          podrozwiazanie: data.podrozwiazanie || "",
+          produkt: data.produkt || "",
+          obszar: data.obszar || "",
+          firma: data.firma || "",
+          book_id: data.book_id || null,
+          chapter_id: data.chapter_id || null,
+          ksiazka_nazwa: data.ksiazka_nazwa || "",
+          rozdzial_nazwa: data.rozdzial_nazwa || ""
+        });
+      }
+      setIsFormVisible(true);
+    } catch (err) {
+      console.error("Suggestion error:", err);
+      setIsFormVisible(true); // Still show form even if AI fails
+    } finally {
+      setIsSuggesting(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     if (!content.trim()) return;
     try {
       setStatus("Wysyłanie...");
       const res = await fetch(`${apiUrl}/api/notes`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "token": token || "" },
-        body: JSON.stringify({ title, content, image }),
+        body: JSON.stringify({
+          title,
+          content,
+          image,
+          tags: [
+            ...(noteData.rozwiazanie ? [{ name: "Rozwiązanie", value: noteData.rozwiazanie }] : []),
+            ...(noteData.podrozwiazanie ? [{ name: "Podrozwiązanie", value: noteData.podrozwiazanie }] : []),
+            ...(noteData.produkt ? [{ name: "Produkt", value: noteData.produkt }] : []),
+            ...(noteData.obszar ? [{ name: "Obszar", value: noteData.obszar }] : []),
+            ...(noteData.firma ? [{ name: "Firma", value: noteData.firma }] : []),
+          ],
+          priority,
+          book_id: noteData.book_id,
+          chapter_id: noteData.chapter_id
+        }),
       });
       if (res.ok) {
         setStatus("Wysłano pomyślnie!");
         setTitle("");
         setContent("");
         setImage(null);
+        setNoteData({
+          rozwiazanie: "",
+          podrozwiazanie: "",
+          produkt: "",
+          obszar: "",
+          firma: "",
+          book_id: null,
+          chapter_id: null,
+          ksiazka_nazwa: "",
+          rozdzial_nazwa: ""
+        });
+        setPriority(0);
+        setIsFormVisible(false);
         if (editor) editor.commands.clearContent();
         setTimeout(() => {
           setStatus("");
@@ -271,29 +432,29 @@ function App() {
   };
 
   return (
-    <main className={`app-container view-${view}`}>
-      {view === "IDLE" && (
-        <div className="interaction-wrapper">
-          <div
-            className="main-trigger"
-            onClick={() => {
-              if (!token) updateWindow("LOGIN");
-              else updateWindow("FORM");
-            }}
-            title="Otwórz ArcusAi"
-          >
-            <div className="icon-wrapper">
-              <div
-                className="app-logo"
-                style={{
-                  backgroundImage: `url(${logo})`,
-                  pointerEvents: 'none',
-                }}
-              />
+    <main className={`app-container ${view === "IDLE" ? "idle-view" : ""}`}>
+        {view === "IDLE" && (
+          <div className="interaction-wrapper">
+            <div
+              className="main-trigger"
+              onClick={() => {
+                if (!token) updateWindow("LOGIN");
+                else updateWindow("FORM");
+              }}
+              title="Otwórz ArcusAi"
+            >
+              <div className="icon-wrapper">
+                <div
+                  className="app-logo"
+                  style={{
+                    backgroundImage: `url(${logo})`,
+                    pointerEvents: 'none',
+                  }}
+                />
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
       {(view === "FORM" || view === "INFO" || (view as any) === "ADMIN") && (
         <div className={`panel-content ${view === "FORM" ? "form-view" : view === "INFO" ? "info-view" : "admin-view"}`}>
@@ -328,71 +489,307 @@ function App() {
 
             <div className="view-container">
               {view === "FORM" ? (
-                <form onSubmit={handleSubmit} className="note-form">
-                  <input
-                    className="title-input"
-                    type="text"
-                    placeholder="Tytuł wpisu..."
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    autoFocus
-                  />
+                <>
+                  <form onSubmit={handleSubmit} className="note-form">
+                    <input
+                      className="title-input"
+                      type="text"
+                      placeholder="Tytuł wpisu..."
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      autoFocus
+                    />
 
-                  <div className="editor-toolbar">
-                    <button
-                      type="button"
-                      onClick={() => handleFormat('bold')}
-                      className={editor?.isActive('bold') ? 'active' : ''}
-                      title="Pogrubienie"
-                    >
-                      <b>B</b>
-                    </button>
-                    <div className="toolbar-separator"></div>
-                    <button
-                      type="button"
-                      onClick={() => handleFormat('sql')}
-                      className={`btn-code ${editor?.isActive('codeBlock', { language: 'sql' }) ? 'active' : ''}`}
-                    >
-                      SQL
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleFormat('csharp')}
-                      className={`btn-code ${editor?.isActive('codeBlock', { language: 'csharp' }) ? 'active' : ''}`}
-                    >
-                      C#
-                    </button>
-                  </div>
+                    <div className="editor-toolbar bookstack-style">
+                      <div className="toolbar-section">
+                        <button type="button" onClick={() => editor?.chain().focus().undo().run()} title="Cofnij">↺</button>
+                        <button type="button" onClick={() => editor?.chain().focus().redo().run()} title="Ponów">↻</button>
+                      </div>
 
-                  <div className="rich-editor-container">
-                    <EditorContent editor={editor} className="content-input rich-editor" />
-                  </div>
+                      <div className="toolbar-divider"></div>
 
-                  {image && (
-                    <div className="screenshot-preview">
-                      <img src={image} alt="Preview" />
+                      <div className="toolbar-section">
+                        <select
+                          className="format-dropdown"
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === 'p') editor?.chain().focus().setParagraph().run();
+                            else if (val.startsWith('h')) editor?.chain().focus().toggleHeading({ level: parseInt(val[1]) as any }).run();
+                          }}
+                          value={
+                            editor?.isActive('heading', { level: 2 }) ? 'h2' :
+                              editor?.isActive('heading', { level: 3 }) ? 'h3' :
+                                editor?.isActive('heading', { level: 4 }) ? 'h4' : 'p'
+                          }
+                        >
+                          <option value="p">Paragraf</option>
+                          <option value="h2">Nagłówek 2</option>
+                          <option value="h3">Nagłówek 3</option>
+                          <option value="h4">Nagłówek 4</option>
+                        </select>
+                      </div>
+
+                      <div className="toolbar-divider"></div>
+
+                      <div className="toolbar-section">
+                        <button type="button" onClick={() => handleFormat('bold')} className={editor?.isActive('bold') ? 'active' : ''} title="Pogrubienie"><b>B</b></button>
+                        <button type="button" onClick={() => handleFormat('italic')} className={editor?.isActive('italic') ? 'active' : ''} title="Kursywa"><i>I</i></button>
+                        <button type="button" onClick={() => handleFormat('underline')} className={editor?.isActive('underline') ? 'active' : ''} title="Podkreślenie"><u>U</u></button>
+                      </div>
+
+                      <div className="toolbar-divider"></div>
+
+                      <div className="toolbar-section">
+                        <button type="button" onClick={() => handleFormat('alignLeft')} className={editor?.isActive({ textAlign: 'left' }) ? 'active' : ''}>≡</button>
+                        <button type="button" onClick={() => handleFormat('alignCenter')} className={editor?.isActive({ textAlign: 'center' }) ? 'active' : ''}>≣</button>
+                        <button type="button" onClick={() => handleFormat('alignRight')} className={editor?.isActive({ textAlign: 'right' }) ? 'active' : ''}>≡</button>
+                      </div>
+
+                      <div className="toolbar-divider"></div>
+
+                      <div className="toolbar-section">
+                        <button type="button" onClick={() => handleFormat('bulletList')} className={editor?.isActive('bulletList') ? 'active' : ''}>•</button>
+                        <button type="button" onClick={() => handleFormat('orderedList')} className={editor?.isActive('orderedList') ? 'active' : ''}>1.</button>
+                      </div>
+
+                      <div className="toolbar-divider"></div>
+
+                      <div className="toolbar-section">
+                        <button type="button" onClick={() => handleFormat('table')} title="Tabela">⊞</button>
+                        <button type="button" onClick={() => handleFormat('hr')} title="Linia">―</button>
+                        <button type="button" onClick={() => setCallout('info')} title="Cytat">❝</button>
+                      </div>
+
+                      <div className="toolbar-divider"></div>
+
+                      <div className="toolbar-section">
+                        <select
+                          className="language-selector-mini"
+                          onChange={(e) => handleFormat('codeBlock', e.target.value)}
+                          value={editor?.getAttributes('codeBlock').language || ""}
+                        >
+                          <option value="">Kod...</option>
+                          <option value="javascript">JS</option>
+                          <option value="python">PY</option>
+                          <option value="sql">SQL</option>
+                          <option value="csharp">C#</option>
+                          <option value="php">PHP</option>
+                          <option value="html">HTML</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="rich-editor-container">
+                      <EditorContent editor={editor} className="content-input rich-editor" />
+                    </div>
+
+                    {image && (
+                      <div className="screenshot-preview">
+                        <img src={image} alt="Preview" />
+                        <button
+                          type="button"
+                          className="remove-img"
+                          onClick={() => setImage(null)}
+                        >✕</button>
+                      </div>
+                    )}
+
+                    {!isFormVisible && (
+                      <div className="pre-form-actions">
+                        <button
+                          type="button"
+                          className={`suggest-action-btn ${isSuggesting ? 'loading' : ''}`}
+                          onClick={handleSuggest}
+                          disabled={!content.trim() || isSuggesting}
+                        >
+                          {isSuggesting ? (
+                            <>
+                              <div className="spinner"></div>
+                              <span>Analizowanie treści...</span>
+                            </>
+                          ) : (
+                            "Dalej / Analizuj"
+                          )}
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="form-actions">
                       <button
                         type="button"
-                        className="remove-img"
-                        onClick={() => setImage(null)}
-                      >✕</button>
+                        className="clipboard-btn"
+                        onClick={handleClipboardPaste}
+                        title="Wklej obraz lub tekst ze schowka"
+                      >
+                        📋 Wklej Schowek
+                      </button>
+                    </div>
+                  </form>
+
+                  {isFormVisible && (
+                    <div className="meta-overlay-wrapper fade-in" onClick={() => setIsFormVisible(false)}>
+                      <div className="meta-overlay-content" onClick={e => e.stopPropagation()}>
+                        <div className="meta-header">
+                          <div className="ai-badge">🤖 Zasugerowane przez AI</div>
+                          <h3>Analiza i Metadane</h3>
+                          <button type="button" className="close-overlay-btn" onClick={() => setIsFormVisible(false)}>✕</button>
+                        </div>
+
+                        <div className="meta-body">
+                          <div className="meta-grid">
+                            <div className="meta-group">
+                              <h4>Kategorie i Tagi</h4>
+                              <div className="note-form-grid">
+                                <div className="form-field">
+                                  <label>Rozwiązanie:</label>
+                                  <input
+                                    placeholder="Np. sql, skrypt..."
+                                    value={noteData.rozwiazanie}
+                                    onChange={(e) => setNoteData({ ...noteData, rozwiazanie: e.target.value })}
+                                  />
+                                </div>
+
+                                <div className="form-field">
+                                  <label>Podrozwiązanie:</label>
+                                  <input
+                                    placeholder="Np. procedura, widok..."
+                                    value={noteData.podrozwiazanie}
+                                    onChange={(e) => setNoteData({ ...noteData, podrozwiazanie: e.target.value })}
+                                  />
+                                </div>
+
+                                <div className="form-field">
+                                  <label>Produkt:</label>
+                                  <input
+                                    placeholder="Np. dms, xl, optima..."
+                                    value={noteData.produkt}
+                                    onChange={(e) => setNoteData({ ...noteData, produkt: e.target.value })}
+                                  />
+                                </div>
+
+                                <div className="form-field">
+                                  <label>Obszar:</label>
+                                  <input
+                                    placeholder="Np. handel, księgowość..."
+                                    value={noteData.obszar}
+                                    onChange={(e) => setNoteData({ ...noteData, obszar: e.target.value })}
+                                  />
+                                </div>
+
+                                <div className="form-field">
+                                  <label>Firma:</label>
+                                  <input
+                                    placeholder="Np. firma..."
+                                    value={noteData.firma}
+                                    onChange={(e) => setNoteData({ ...noteData, firma: e.target.value })}
+                                  />
+                                </div>
+
+                                <div className="form-field">
+                                  <label>Priorytet:</label>
+                                  <input
+                                    type="number"
+                                    value={priority}
+                                    onChange={(e) => setPriority(parseInt(e.target.value) || 0)}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="meta-group placement-group">
+                              <h4>Miejsce w Bazie Wiedzy</h4>
+                              <div className="placement-info">
+                                <div className="form-field">
+                                  <label>Książka (Docelowa):</label>
+                                  <div className="suggestion-readonly">
+                                    {noteData.ksiazka_nazwa || "Domyślna (notatki)"}
+                                  </div>
+                                </div>
+                                {noteData.rozdzial_nazwa && (
+                                  <div className="form-field">
+                                    <label>Rozdział:</label>
+                                    <div className="suggestion-readonly">
+                                      {noteData.rozdzial_nazwa}
+                                    </div>
+                                  </div>
+                                )}
+                                <p className="placement-hint">AI wybrało powyższą lokalizację na podstawie struktury Twojej bazy wiedzy.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="overlay-footer">
+                          <button type="button" className="cancel-btn" onClick={() => setIsFormVisible(false)}>Cofnij do edycji</button>
+                          <button type="button" className="confirm-btn" onClick={handleSubmit}>Potwierdź i Zapisz Notatkę</button>
+                        </div>
+                      </div>
                     </div>
                   )}
-
-                  <div className="form-actions">
-                    <button
-                      type="button"
-                      className="clipboard-btn"
-                      onClick={handleClipboardPaste}
-                      title="Wklej obraz lub tekst ze schowka"
-                    >
-                      📋 Wklej Schowek
-                    </button>
-                    <button type="submit" className="submit-btn" onClick={(e) => e.stopPropagation()}>Zapisz</button>
-                  </div>
-                </form>
+                </>
               ) : (
                 <div className="chat-container">
+                  <div className="chat-header-actions">
+                    <div className="recent-chats-list">
+                      <button
+                        className="new-chat-btn"
+                        onClick={() => {
+                          setChatMessages([]);
+                          setCurrentConversationId(null);
+                        }}
+                      >
+                        + Nowy Czat
+                      </button>
+                      <div className="recent-items">
+                        {recentConversations.map(c => (
+                          <div key={c.id} className="recent-chat-wrapper">
+                            <button
+                              className={`recent-chat-item ${currentConversationId === c.id ? 'active' : ''}`}
+                              onClick={async () => {
+                                try {
+                                  setStatus("Ładowanie...");
+                                  const res = await fetch(`${apiUrl}/api/conversations/${c.id}`, {
+                                    headers: { "token": token || "" }
+                                  });
+                                  const data = await res.json();
+                                  if (res.ok) {
+                                    setChatMessages(data);
+                                    setCurrentConversationId(c.id);
+                                  }
+                                  setStatus("");
+                                } catch (e) { setStatus("Błąd ładowania"); }
+                              }}
+                              title={c.title}
+                            >
+                              {c.title.length > 15 ? c.title.substring(0, 15) + "..." : c.title}
+                            </button>
+                            <button
+                              className="delete-chat-btn"
+                              title="Usuń konwersację"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (!window.confirm("Czy na pewno chcesz usunąć tę konwersację?")) return;
+                                try {
+                                  const res = await fetch(`${apiUrl}/api/conversations/${c.id}`, {
+                                    method: 'DELETE',
+                                    headers: { "token": token || "" }
+                                  });
+                                  if (res.ok) {
+                                    if (currentConversationId === c.id) {
+                                      setChatMessages([]);
+                                      setCurrentConversationId(null);
+                                    }
+                                    fetchRecentConversations();
+                                  }
+                                } catch (e) { console.error("Error deleting chat", e); }
+                              }}
+                            >✕</button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="chat-messages">
                     {chatMessages.length === 0 && (
                       <div className="chat-welcome">
@@ -482,17 +879,13 @@ function App() {
                       onChange={handleFileUpload}
                       accept=".pdf,.docx,.sql,.txt,.cs,.py,.js"
                     />
-                    <label htmlFor="chat-file-upload" className={`chat-upload-btn ${isUploading ? 'loading' : ''}`}>
+                    <label className={`chat-upload-btn ${isUploading ? 'loading' : ''}`} title="Wgraj plik do analizy">
                       {isUploading ? <div className="spinner"></div> : "📎"}
-                      {isUploading && status && (
-                        <div className="upload-tooltip">
-                          {status}
-                        </div>
-                      )}
+                      <input type="file" onChange={handleFileUpload} disabled={isUploading} hidden />
                     </label>
                     <input
-                      className="chat-input-field"
                       type="text"
+                      className="chat-input-field"
                       placeholder="Napisz wiadomość..."
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
@@ -528,10 +921,6 @@ function App() {
                   <input type="password" placeholder="Hasło" value={loginForm.pass} onChange={e => setLoginForm({ ...loginForm, pass: e.target.value })} required />
                   <button type="submit" className="submit-btn login-btn">Zaloguj</button>
                 </form>
-                {status && <p className="error-text">{status}</p>}
-                <div className="login-footer">
-                  <small></small>
-                </div>
               </div>
             </div>
           </div>
