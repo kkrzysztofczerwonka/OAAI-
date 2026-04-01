@@ -209,9 +209,42 @@ body {
   border-radius: 3px 3px 0 0;
 }
 
-.close-btn {
-  background: var(--bg-secondary);
-  color: var(--text-muted);
+.window-controls {
+  display: flex;
+  background: #f1f5f9;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 0 8px;
+  border: 1px solid var(--border-color);
+}
+
+.win-btn {
+  background: transparent;
+  border: none;
+  width: 32px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #64748b;
+  font-size: 10px;
+  transition: all 0.2s;
+}
+
+.win-btn:hover {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+
+.win-btn.close:hover {
+  background: #ef4444;
+  color: #ffffff;
+}
+
+.back-to-idle-btn {
+  background: var(--accent-primary);
+  color: white;
   border: none;
   width: 28px;
   height: 28px;
@@ -220,12 +253,13 @@ body {
   justify-content: center;
   align-items: center;
   cursor: pointer;
-  font-size: 0.9rem;
+  font-size: 1rem;
+  transition: transform 0.2s;
 }
 
-.close-btn:hover {
-  background: #fee2e2;
-  color: #ef4444;
+.back-to-idle-btn:hover {
+  transform: translateX(-2px);
+  background: var(--accent-secondary);
 }
 
 /* Form Styles */

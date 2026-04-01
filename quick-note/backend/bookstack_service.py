@@ -14,6 +14,8 @@ class BookStackService:
             "Accept": "application/json"
         }
         self.logger = logging.getLogger("BookStackService")
+        self.all_pages_map = {} # Mapa ID -> {name, book_id, ...}
+        self.structure_cache = None
 
     def _get(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
         response = requests.get(f"{self.base_url}/{endpoint}", headers=self.headers, params=params)
@@ -192,3 +194,47 @@ class BookStackService:
         response = requests.get(url, headers=self.headers, timeout=10)
         response.raise_for_status()
         return response.content
+
+    def refresh_map(self):
+        """Build a flat map of all pages for fast title lookup with pagination support"""
+        try:
+            full_data = []
+            offset = 0
+            count = 500 # Pobieramy paczkami po 500
+            
+            while True:
+                response_data = self._get("pages", params={"count": count, "offset": offset})
+                batch = response_data.get("data", [])
+                if not batch:
+                    break
+                full_data.extend(batch)
+                if len(batch) < count:
+                    break
+                offset += count
+            
+            new_map = {}
+            for p in full_data:
+                new_map[p['id']] = p
+                
+            self.all_pages_map = new_map
+            print(f"[SYNC] Mapa stron odświeżona: {len(new_map)} stron.", flush=True)
+        except Exception as e:
+            print(f"[SYNC] Błąd przy odświeżaniu mapy stron: {e}", flush=True)
+
+    def get_structure_context(self) -> str:
+        """Generate a text representation of the BookStack structure for LLM context"""
+        if not self.structure_cache:
+            self.structure_cache = self.get_global_structure()
+            
+        ctx = "STRUKTURA BAZY WIEDZY:\n"
+        for shelf in self.structure_cache.get("shelves", []):
+            ctx += f"Półka: {shelf['name']}\n"
+            for book in shelf.get("books", []):
+                ctx += f"  Książka: {book['name']}\n"
+                for chapter in book.get("chapters", []):
+                    ctx += f"    Rozdział: {chapter['name']}\n"
+                    for p in chapter.get("pages", []):
+                        ctx += f"      Strona ID {p['id']}: {p['name']}\n"
+                for p in book.get("pages_direct", []):
+                    ctx += f"    Strona ID {p['id']}: {p['name']}\n"
+        return ctx

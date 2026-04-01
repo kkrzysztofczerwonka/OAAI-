@@ -2,25 +2,25 @@ import { useState, useEffect } from "react";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
-import { useEditor, EditorContent } from '@tiptap/react';
-import { StarterKit } from '@tiptap/starter-kit';
-import { CodeBlockLowlight } from '@tiptap/extension-code-block-lowlight';
-import { Placeholder } from '@tiptap/extension-placeholder';
-import { Underline } from '@tiptap/extension-underline';
-import { TextAlign } from '@tiptap/extension-text-align';
-import { Image } from '@tiptap/extension-image';
-import { Table } from '@tiptap/extension-table';
-import { TableRow } from '@tiptap/extension-table-row';
-import { TableCell } from '@tiptap/extension-table-cell';
-import { TableHeader } from '@tiptap/extension-table-header';
-import { Link } from '@tiptap/extension-link';
-import { TaskList } from '@tiptap/extension-task-list';
-import { TaskItem } from '@tiptap/extension-task-item';
-import { common, createLowlight } from 'lowlight';
+import { useEditor, EditorContent } from "@tiptap/react";
+import { StarterKit } from "@tiptap/starter-kit";
+import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
+import { Placeholder } from "@tiptap/extension-placeholder";
+import { Underline } from "@tiptap/extension-underline";
+import { TextAlign } from "@tiptap/extension-text-align";
+import { Image } from "@tiptap/extension-image";
+import { Table } from "@tiptap/extension-table";
+import { TableRow } from "@tiptap/extension-table-row";
+import { TableCell } from "@tiptap/extension-table-cell";
+import { TableHeader } from "@tiptap/extension-table-header";
+import { Link } from "@tiptap/extension-link";
+import { TaskList } from "@tiptap/extension-task-list";
+import { TaskItem } from "@tiptap/extension-task-item";
+import { common, createLowlight } from "lowlight";
 import logo from "./assets/logo.png";
-import { useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useRef } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 // Load lowlight languages
 const lowlight = createLowlight(common);
@@ -40,7 +40,7 @@ function App() {
   const [image, setImage] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [query, setQuery] = useState("");
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'ai', text: string, sources?: any[] }[]>([]);
+  const [chatMessages, setChatMessages] = useState<{ role: "user" | "ai"; text: string; sources?: any[] }[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [isQuerying, setIsQuerying] = useState(false);
   const [noteData, setNoteData] = useState({
@@ -52,13 +52,13 @@ function App() {
     book_id: null as number | null,
     chapter_id: null as number | null,
     ksiazka_nazwa: "",
-    rozdzial_nazwa: ""
+    rozdzial_nazwa: "",
   });
   const [priority, setPriority] = useState<number>(0);
   const [isFormVisible, setIsFormVisible] = useState(false);
   const [isSuggesting, setIsSuggesting] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState<number | null>(null);
-  const [recentConversations, setRecentConversations] = useState<{ id: number, title: string }[]>([]);
+  const [recentConversations, setRecentConversations] = useState<{ id: number; title: string }[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -75,11 +75,13 @@ function App() {
     if (!token) return;
     try {
       const res = await fetch(`${apiUrl}/api/conversations`, {
-        headers: { "token": token }
+        headers: { token: token },
       });
       const data = await res.json();
       if (res.ok) setRecentConversations(data);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   useEffect(() => {
@@ -94,7 +96,7 @@ function App() {
         heading: { levels: [2, 3, 4, 5] },
       }),
       Underline,
-      TextAlign.configure({ types: ['heading', 'paragraph'] }),
+      TextAlign.configure({ types: ["heading", "paragraph"] }),
       Image.configure({ inline: true, allowBase64: true }),
       Table.configure({ resizable: true }),
       TableRow,
@@ -105,10 +107,10 @@ function App() {
       TaskItem.configure({ nested: true }),
       CodeBlockLowlight.configure({ lowlight }),
       Placeholder.configure({
-        placeholder: 'Zacznij pisać...',
+        placeholder: "Zacznij pisać...",
       }),
     ],
-    content: '',
+    content: "",
     onUpdate: ({ editor }) => {
       setContent(editor.getHTML());
     },
@@ -149,8 +151,17 @@ function App() {
     setupWindow();
   }, []);
 
-  const updateWindow = async (targetView: ViewState) => {
+  const updateWindow = async (targetView: ViewState | "LOGIN" | "ADMIN") => {
     if (isLocked && targetView !== "IDLE") return;
+
+    // Jeżeli już jesteśmy w trybie "rozszerzonym" i przełączamy zakładkę, nie zmieniaj rozmiaru
+    const isExpanded = view === "FORM" || view === "INFO" || view === "LOGIN" || view === "ADMIN";
+    const willBeExpanded = targetView === "FORM" || targetView === "INFO" || targetView === "LOGIN" || targetView === "ADMIN";
+
+    if (isExpanded && willBeExpanded) {
+      setView(targetView);
+      return;
+    }
 
     const win = getCurrentWindow();
     const screenWidth = window.screen.width;
@@ -159,13 +170,18 @@ function App() {
     let width = 48;
     let height = 48;
 
-    if (targetView === "FORM" || targetView === "INFO" || targetView === "LOGIN") {
+    if (willBeExpanded) {
       width = Math.max(450, Math.floor(screenWidth / 4));
       height = Math.max(600, Math.floor(screenHeight / 1.8));
     }
 
     try {
-      await win.setPosition(new LogicalPosition(screenWidth - width - 20, 40));
+      if (willBeExpanded) {
+        await win.setPosition(new LogicalPosition(screenWidth - width - 20, 40));
+      } else {
+        // Powrót do małego kółeczka/ikonki
+        await win.setPosition(new LogicalPosition(screenWidth - 80, 40));
+      }
       await win.setSize(new LogicalSize(width, height));
       setView(targetView);
     } catch (e) {
@@ -184,29 +200,61 @@ function App() {
     const chain = editor.chain().focus();
 
     switch (type) {
-      case 'bold': chain.toggleBold().run(); break;
-      case 'italic': chain.toggleItalic().run(); break;
-      case 'underline': chain.toggleUnderline().run(); break;
-      case 'strike': chain.toggleStrike().run(); break;
-      case 'h2': chain.toggleHeading({ level: 2 }).run(); break;
-      case 'h3': chain.toggleHeading({ level: 3 }).run(); break;
-      case 'bulletList': chain.toggleBulletList().run(); break;
-      case 'orderedList': chain.toggleOrderedList().run(); break;
-      case 'taskList': chain.toggleTaskList().run(); break;
-      case 'alignLeft': chain.setTextAlign('left').run(); break;
-      case 'alignCenter': chain.setTextAlign('center').run(); break;
-      case 'alignRight': chain.setTextAlign('right').run(); break;
-      case 'table': chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(); break;
-      case 'hr': chain.setHorizontalRule().run(); break;
-      case 'codeBlock':
+      case "bold":
+        chain.toggleBold().run();
+        break;
+      case "italic":
+        chain.toggleItalic().run();
+        break;
+      case "underline":
+        chain.toggleUnderline().run();
+        break;
+      case "strike":
+        chain.toggleStrike().run();
+        break;
+      case "h2":
+        chain.toggleHeading({ level: 2 }).run();
+        break;
+      case "h3":
+        chain.toggleHeading({ level: 3 }).run();
+        break;
+      case "bulletList":
+        chain.toggleBulletList().run();
+        break;
+      case "orderedList":
+        chain.toggleOrderedList().run();
+        break;
+      case "taskList":
+        chain.toggleTaskList().run();
+        break;
+      case "alignLeft":
+        chain.setTextAlign("left").run();
+        break;
+      case "alignCenter":
+        chain.setTextAlign("center").run();
+        break;
+      case "alignRight":
+        chain.setTextAlign("right").run();
+        break;
+      case "table":
+        chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+        break;
+      case "hr":
+        chain.setHorizontalRule().run();
+        break;
+      case "codeBlock":
         if (value) chain.toggleCodeBlock({ language: value }).run();
         break;
-      case 'sql': chain.toggleCodeBlock({ language: 'sql' }).run(); break;
-      case 'csharp': chain.toggleCodeBlock({ language: 'csharp' }).run(); break;
+      case "sql":
+        chain.toggleCodeBlock({ language: "sql" }).run();
+        break;
+      case "csharp":
+        chain.toggleCodeBlock({ language: "csharp" }).run();
+        break;
     }
   };
 
-  const setCallout = (_type: 'info' | 'success' | 'warning' | 'danger') => {
+  const setCallout = (_type: "info" | "success" | "warning" | "danger") => {
     if (!editor) return;
     // For now using blockquote as a generic callout
     editor.chain().focus().toggleBlockquote().run();
@@ -243,7 +291,6 @@ function App() {
     updateWindow("IDLE");
   };
 
-
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -255,7 +302,7 @@ function App() {
     try {
       const res = await fetch(`${apiUrl}/api/upload`, {
         method: "POST",
-        headers: { "token": token || "" },
+        headers: { token: token || "" },
         body: formData,
       });
       const data = await res.json();
@@ -273,10 +320,13 @@ function App() {
               clearInterval(pollId);
               setIsUploading(false);
               if (sData.summary) {
-                setChatMessages(prev => [...prev, {
-                  role: 'ai',
-                  text: `### 📂 Podsumowanie: ${file.name}\n${sData.summary}`
-                }]);
+                setChatMessages((prev) => [
+                  ...prev,
+                  {
+                    role: "ai",
+                    text: `### 📂 Podsumowanie: ${file.name}\n${sData.summary}`,
+                  },
+                ]);
               }
               setTimeout(() => setStatus(""), 5000);
             }
@@ -298,7 +348,7 @@ function App() {
   const handleQuery = async () => {
     if (!query.trim()) return;
 
-    const userMessage = { role: 'user' as const, text: query };
+    const userMessage = { role: "user" as const, text: query };
     const currentHistory = [...chatMessages, userMessage];
 
     setChatMessages(currentHistory);
@@ -310,32 +360,35 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "token": token || ""
+          token: token || "",
         },
         body: JSON.stringify({
-          messages: currentHistory.map(m => ({
+          messages: currentHistory.map((m) => ({
             role: m.role,
-            content: m.text
+            content: m.text,
           })),
-          conversation_id: currentConversationId
-        })
+          conversation_id: currentConversationId,
+        }),
       });
       const data = await res.json();
       if (data.answer) {
-        setChatMessages(prev => [...prev, {
-          role: 'ai',
-          text: data.answer,
-          sources: data.sources
-        }]);
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: data.answer,
+            sources: data.sources,
+          },
+        ]);
         if (data.conversation_id) {
           setCurrentConversationId(data.conversation_id);
           fetchRecentConversations();
         }
       } else if (data.error) {
-        setChatMessages(prev => [...prev, { role: 'ai', text: `Błąd: ${data.error}` }]);
+        setChatMessages((prev) => [...prev, { role: "ai", text: `Błąd: ${data.error}` }]);
       }
     } catch (err) {
-      setChatMessages(prev => [...prev, { role: 'ai', text: "Błąd połączenia z modelem" }]);
+      setChatMessages((prev) => [...prev, { role: "ai", text: "Błąd połączenia z modelem" }]);
     } finally {
       setIsQuerying(false);
     }
@@ -349,9 +402,9 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "token": token || ""
+          token: token || "",
         },
-        body: JSON.stringify({ content: editor?.getText() || content })
+        body: JSON.stringify({ content: editor?.getText() || content }),
       });
       const data = await res.json();
       if (data && !data.error) {
@@ -364,7 +417,7 @@ function App() {
           book_id: data.book_id || null,
           chapter_id: data.chapter_id || null,
           ksiazka_nazwa: data.ksiazka_nazwa || "",
-          rozdzial_nazwa: data.rozdzial_nazwa || ""
+          rozdzial_nazwa: data.rozdzial_nazwa || "",
         });
       }
       setIsFormVisible(true);
@@ -383,7 +436,7 @@ function App() {
       setStatus("Wysyłanie...");
       const res = await fetch(`${apiUrl}/api/notes`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "token": token || "" },
+        headers: { "Content-Type": "application/json", token: token || "" },
         body: JSON.stringify({
           title,
           content,
@@ -397,7 +450,7 @@ function App() {
           ],
           priority,
           book_id: noteData.book_id,
-          chapter_id: noteData.chapter_id
+          chapter_id: noteData.chapter_id,
         }),
       });
       if (res.ok) {
@@ -414,7 +467,7 @@ function App() {
           book_id: null,
           chapter_id: null,
           ksiazka_nazwa: "",
-          rozdzial_nazwa: ""
+          rozdzial_nazwa: "",
         });
         setPriority(0);
         setIsFormVisible(false);
@@ -433,57 +486,63 @@ function App() {
 
   return (
     <main className={`app-container ${view === "IDLE" ? "idle-view" : ""}`}>
-        {view === "IDLE" && (
-          <div className="interaction-wrapper">
-            <div
-              className="main-trigger"
-              onClick={() => {
-                if (!token) updateWindow("LOGIN");
-                else updateWindow("FORM");
-              }}
-              title="Otwórz ArcusAi"
-            >
-              <div className="icon-wrapper">
-                <div
-                  className="app-logo"
-                  style={{
-                    backgroundImage: `url(${logo})`,
-                    pointerEvents: 'none',
-                  }}
-                />
-              </div>
+      {view === "IDLE" && (
+        <div className="interaction-wrapper">
+          <div
+            className="main-trigger"
+            onClick={() => {
+              if (!token) updateWindow("LOGIN");
+              else updateWindow("FORM");
+            }}
+            title="Otwórz ArcusAi"
+          >
+            <div className="icon-wrapper">
+              <div
+                className="app-logo"
+                style={{
+                  backgroundImage: `url(${logo})`,
+                  pointerEvents: "none",
+                }}
+              />
             </div>
           </div>
-        )}
+        </div>
+      )}
 
       {(view === "FORM" || view === "INFO" || (view as any) === "ADMIN") && (
         <div className={`panel-content ${view === "FORM" ? "form-view" : view === "INFO" ? "info-view" : "admin-view"}`}>
           <div className="panel-sidebar">
-            <div
-              className="sidebar-logo"
-              style={{ backgroundImage: `url(${logo})` }}
-            />
+            <div className="sidebar-logo" style={{ backgroundImage: `url(${logo})` }} />
           </div>
           <div className="panel-main">
             <div className="panel-header">
               <div className="header-tabs">
-                <button
-                  className={`tab-btn ${view === "FORM" ? "active" : ""}`}
-                  onClick={() => updateWindow("FORM")}
-                >
+                <button className={`tab-btn ${view === "FORM" ? "active" : ""}`} onClick={() => updateWindow("FORM")}>
                   Nowa Notatka
                 </button>
-                <button
-                  className={`tab-btn ${view === "INFO" ? "active" : ""}`}
-                  onClick={() => updateWindow("INFO")}
-                >
+                <button className={`tab-btn ${view === "INFO" ? "active" : ""}`} onClick={() => updateWindow("INFO")}>
                   Zadaj Pytanie
                 </button>
               </div>
               <div className="header-actions">
                 <span className="user-badge">{username}</span>
-                <button className="logout-btn" onClick={handleLogout} title="Wyloguj">🚪</button>
-                <button className="close-btn" onClick={handleMinimize}>✕</button>
+                <button className="logout-btn" onClick={handleLogout} title="Wyloguj">
+                  🚪
+                </button>
+                <div className="window-controls">
+                  <button className="win-btn minimize" onClick={() => getCurrentWindow().minimize()} title="Minimalizuj">
+                    ⚊
+                  </button>
+                  <button className="win-btn maximize" onClick={() => getCurrentWindow().toggleMaximize()} title="Pełny ekran">
+                    ▢
+                  </button>
+                  <button className="win-btn close" onClick={() => getCurrentWindow().close()} title="Zamknij">
+                    ✕
+                  </button>
+                </div>
+                <button className="back-to-idle-btn" onClick={handleMinimize} title="Zwiń do boku">
+                  ⇠
+                </button>
               </div>
             </div>
 
@@ -491,19 +550,16 @@ function App() {
               {view === "FORM" ? (
                 <>
                   <form onSubmit={handleSubmit} className="note-form">
-                    <input
-                      className="title-input"
-                      type="text"
-                      placeholder="Tytuł wpisu..."
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                      autoFocus
-                    />
+                    <input className="title-input" type="text" placeholder="Tytuł wpisu..." value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
 
                     <div className="editor-toolbar bookstack-style">
                       <div className="toolbar-section">
-                        <button type="button" onClick={() => editor?.chain().focus().undo().run()} title="Cofnij">↺</button>
-                        <button type="button" onClick={() => editor?.chain().focus().redo().run()} title="Ponów">↻</button>
+                        <button type="button" onClick={() => editor?.chain().focus().undo().run()} title="Cofnij">
+                          ↺
+                        </button>
+                        <button type="button" onClick={() => editor?.chain().focus().redo().run()} title="Ponów">
+                          ↻
+                        </button>
                       </div>
 
                       <div className="toolbar-divider"></div>
@@ -513,13 +569,22 @@ function App() {
                           className="format-dropdown"
                           onChange={(e) => {
                             const val = e.target.value;
-                            if (val === 'p') editor?.chain().focus().setParagraph().run();
-                            else if (val.startsWith('h')) editor?.chain().focus().toggleHeading({ level: parseInt(val[1]) as any }).run();
+                            if (val === "p") editor?.chain().focus().setParagraph().run();
+                            else if (val.startsWith("h"))
+                              editor
+                                ?.chain()
+                                .focus()
+                                .toggleHeading({ level: parseInt(val[1]) as any })
+                                .run();
                           }}
                           value={
-                            editor?.isActive('heading', { level: 2 }) ? 'h2' :
-                              editor?.isActive('heading', { level: 3 }) ? 'h3' :
-                                editor?.isActive('heading', { level: 4 }) ? 'h4' : 'p'
+                            editor?.isActive("heading", { level: 2 })
+                              ? "h2"
+                              : editor?.isActive("heading", { level: 3 })
+                                ? "h3"
+                                : editor?.isActive("heading", { level: 4 })
+                                  ? "h4"
+                                  : "p"
                           }
                         >
                           <option value="p">Paragraf</option>
@@ -532,32 +597,54 @@ function App() {
                       <div className="toolbar-divider"></div>
 
                       <div className="toolbar-section">
-                        <button type="button" onClick={() => handleFormat('bold')} className={editor?.isActive('bold') ? 'active' : ''} title="Pogrubienie"><b>B</b></button>
-                        <button type="button" onClick={() => handleFormat('italic')} className={editor?.isActive('italic') ? 'active' : ''} title="Kursywa"><i>I</i></button>
-                        <button type="button" onClick={() => handleFormat('underline')} className={editor?.isActive('underline') ? 'active' : ''} title="Podkreślenie"><u>U</u></button>
+                        <button type="button" onClick={() => handleFormat("bold")} className={editor?.isActive("bold") ? "active" : ""} title="Pogrubienie">
+                          <b>B</b>
+                        </button>
+                        <button type="button" onClick={() => handleFormat("italic")} className={editor?.isActive("italic") ? "active" : ""} title="Kursywa">
+                          <i>I</i>
+                        </button>
+                        <button type="button" onClick={() => handleFormat("underline")} className={editor?.isActive("underline") ? "active" : ""} title="Podkreślenie">
+                          <u>U</u>
+                        </button>
                       </div>
 
                       <div className="toolbar-divider"></div>
 
                       <div className="toolbar-section">
-                        <button type="button" onClick={() => handleFormat('alignLeft')} className={editor?.isActive({ textAlign: 'left' }) ? 'active' : ''}>≡</button>
-                        <button type="button" onClick={() => handleFormat('alignCenter')} className={editor?.isActive({ textAlign: 'center' }) ? 'active' : ''}>≣</button>
-                        <button type="button" onClick={() => handleFormat('alignRight')} className={editor?.isActive({ textAlign: 'right' }) ? 'active' : ''}>≡</button>
+                        <button type="button" onClick={() => handleFormat("alignLeft")} className={editor?.isActive({ textAlign: "left" }) ? "active" : ""}>
+                          ≡
+                        </button>
+                        <button type="button" onClick={() => handleFormat("alignCenter")} className={editor?.isActive({ textAlign: "center" }) ? "active" : ""}>
+                          ≣
+                        </button>
+                        <button type="button" onClick={() => handleFormat("alignRight")} className={editor?.isActive({ textAlign: "right" }) ? "active" : ""}>
+                          ≡
+                        </button>
                       </div>
 
                       <div className="toolbar-divider"></div>
 
                       <div className="toolbar-section">
-                        <button type="button" onClick={() => handleFormat('bulletList')} className={editor?.isActive('bulletList') ? 'active' : ''}>•</button>
-                        <button type="button" onClick={() => handleFormat('orderedList')} className={editor?.isActive('orderedList') ? 'active' : ''}>1.</button>
+                        <button type="button" onClick={() => handleFormat("bulletList")} className={editor?.isActive("bulletList") ? "active" : ""}>
+                          •
+                        </button>
+                        <button type="button" onClick={() => handleFormat("orderedList")} className={editor?.isActive("orderedList") ? "active" : ""}>
+                          1.
+                        </button>
                       </div>
 
                       <div className="toolbar-divider"></div>
 
                       <div className="toolbar-section">
-                        <button type="button" onClick={() => handleFormat('table')} title="Tabela">⊞</button>
-                        <button type="button" onClick={() => handleFormat('hr')} title="Linia">―</button>
-                        <button type="button" onClick={() => setCallout('info')} title="Cytat">❝</button>
+                        <button type="button" onClick={() => handleFormat("table")} title="Tabela">
+                          ⊞
+                        </button>
+                        <button type="button" onClick={() => handleFormat("hr")} title="Linia">
+                          ―
+                        </button>
+                        <button type="button" onClick={() => setCallout("info")} title="Cytat">
+                          ❝
+                        </button>
                       </div>
 
                       <div className="toolbar-divider"></div>
@@ -565,8 +652,8 @@ function App() {
                       <div className="toolbar-section">
                         <select
                           className="language-selector-mini"
-                          onChange={(e) => handleFormat('codeBlock', e.target.value)}
-                          value={editor?.getAttributes('codeBlock').language || ""}
+                          onChange={(e) => handleFormat("codeBlock", e.target.value)}
+                          value={editor?.getAttributes("codeBlock").language || ""}
                         >
                           <option value="">Kod...</option>
                           <option value="javascript">JS</option>
@@ -586,22 +673,15 @@ function App() {
                     {image && (
                       <div className="screenshot-preview">
                         <img src={image} alt="Preview" />
-                        <button
-                          type="button"
-                          className="remove-img"
-                          onClick={() => setImage(null)}
-                        >✕</button>
+                        <button type="button" className="remove-img" onClick={() => setImage(null)}>
+                          ✕
+                        </button>
                       </div>
                     )}
 
                     {!isFormVisible && (
                       <div className="pre-form-actions">
-                        <button
-                          type="button"
-                          className={`suggest-action-btn ${isSuggesting ? 'loading' : ''}`}
-                          onClick={handleSuggest}
-                          disabled={!content.trim() || isSuggesting}
-                        >
+                        <button type="button" className={`suggest-action-btn ${isSuggesting ? "loading" : ""}`} onClick={handleSuggest} disabled={!content.trim() || isSuggesting}>
                           {isSuggesting ? (
                             <>
                               <div className="spinner"></div>
@@ -615,12 +695,7 @@ function App() {
                     )}
 
                     <div className="form-actions">
-                      <button
-                        type="button"
-                        className="clipboard-btn"
-                        onClick={handleClipboardPaste}
-                        title="Wklej obraz lub tekst ze schowka"
-                      >
+                      <button type="button" className="clipboard-btn" onClick={handleClipboardPaste} title="Wklej obraz lub tekst ze schowka">
                         📋 Wklej Schowek
                       </button>
                     </div>
@@ -628,11 +703,13 @@ function App() {
 
                   {isFormVisible && (
                     <div className="meta-overlay-wrapper fade-in" onClick={() => setIsFormVisible(false)}>
-                      <div className="meta-overlay-content" onClick={e => e.stopPropagation()}>
+                      <div className="meta-overlay-content" onClick={(e) => e.stopPropagation()}>
                         <div className="meta-header">
                           <div className="ai-badge">🤖 Zasugerowane przez AI</div>
                           <h3>Analiza i Metadane</h3>
-                          <button type="button" className="close-overlay-btn" onClick={() => setIsFormVisible(false)}>✕</button>
+                          <button type="button" className="close-overlay-btn" onClick={() => setIsFormVisible(false)}>
+                            ✕
+                          </button>
                         </div>
 
                         <div className="meta-body">
@@ -660,38 +737,22 @@ function App() {
 
                                 <div className="form-field">
                                   <label>Produkt:</label>
-                                  <input
-                                    placeholder="Np. dms, xl, optima..."
-                                    value={noteData.produkt}
-                                    onChange={(e) => setNoteData({ ...noteData, produkt: e.target.value })}
-                                  />
+                                  <input placeholder="Np. dms, xl, optima..." value={noteData.produkt} onChange={(e) => setNoteData({ ...noteData, produkt: e.target.value })} />
                                 </div>
 
                                 <div className="form-field">
                                   <label>Obszar:</label>
-                                  <input
-                                    placeholder="Np. handel, księgowość..."
-                                    value={noteData.obszar}
-                                    onChange={(e) => setNoteData({ ...noteData, obszar: e.target.value })}
-                                  />
+                                  <input placeholder="Np. handel, księgowość..." value={noteData.obszar} onChange={(e) => setNoteData({ ...noteData, obszar: e.target.value })} />
                                 </div>
 
                                 <div className="form-field">
                                   <label>Firma:</label>
-                                  <input
-                                    placeholder="Np. firma..."
-                                    value={noteData.firma}
-                                    onChange={(e) => setNoteData({ ...noteData, firma: e.target.value })}
-                                  />
+                                  <input placeholder="Np. firma..." value={noteData.firma} onChange={(e) => setNoteData({ ...noteData, firma: e.target.value })} />
                                 </div>
 
                                 <div className="form-field">
                                   <label>Priorytet:</label>
-                                  <input
-                                    type="number"
-                                    value={priority}
-                                    onChange={(e) => setPriority(parseInt(e.target.value) || 0)}
-                                  />
+                                  <input type="number" value={priority} onChange={(e) => setPriority(parseInt(e.target.value) || 0)} />
                                 </div>
                               </div>
                             </div>
@@ -701,16 +762,12 @@ function App() {
                               <div className="placement-info">
                                 <div className="form-field">
                                   <label>Książka (Docelowa):</label>
-                                  <div className="suggestion-readonly">
-                                    {noteData.ksiazka_nazwa || "Domyślna (notatki)"}
-                                  </div>
+                                  <div className="suggestion-readonly">{noteData.ksiazka_nazwa || "Domyślna (notatki)"}</div>
                                 </div>
                                 {noteData.rozdzial_nazwa && (
                                   <div className="form-field">
                                     <label>Rozdział:</label>
-                                    <div className="suggestion-readonly">
-                                      {noteData.rozdzial_nazwa}
-                                    </div>
+                                    <div className="suggestion-readonly">{noteData.rozdzial_nazwa}</div>
                                   </div>
                                 )}
                                 <p className="placement-hint">AI wybrało powyższą lokalizację na podstawie struktury Twojej bazy wiedzy.</p>
@@ -720,8 +777,12 @@ function App() {
                         </div>
 
                         <div className="overlay-footer">
-                          <button type="button" className="cancel-btn" onClick={() => setIsFormVisible(false)}>Cofnij do edycji</button>
-                          <button type="button" className="confirm-btn" onClick={handleSubmit}>Potwierdź i Zapisz Notatkę</button>
+                          <button type="button" className="cancel-btn" onClick={() => setIsFormVisible(false)}>
+                            Cofnij do edycji
+                          </button>
+                          <button type="button" className="confirm-btn" onClick={handleSubmit}>
+                            Potwierdź i Zapisz Notatkę
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -741,15 +802,15 @@ function App() {
                         + Nowy Czat
                       </button>
                       <div className="recent-items">
-                        {recentConversations.map(c => (
+                        {recentConversations.map((c) => (
                           <div key={c.id} className="recent-chat-wrapper">
                             <button
-                              className={`recent-chat-item ${currentConversationId === c.id ? 'active' : ''}`}
+                              className={`recent-chat-item ${currentConversationId === c.id ? "active" : ""}`}
                               onClick={async () => {
                                 try {
                                   setStatus("Ładowanie...");
                                   const res = await fetch(`${apiUrl}/api/conversations/${c.id}`, {
-                                    headers: { "token": token || "" }
+                                    headers: { token: token || "" },
                                   });
                                   const data = await res.json();
                                   if (res.ok) {
@@ -757,7 +818,9 @@ function App() {
                                     setCurrentConversationId(c.id);
                                   }
                                   setStatus("");
-                                } catch (e) { setStatus("Błąd ładowania"); }
+                                } catch (e) {
+                                  setStatus("Błąd ładowania");
+                                }
                               }}
                               title={c.title}
                             >
@@ -771,8 +834,8 @@ function App() {
                                 if (!window.confirm("Czy na pewno chcesz usunąć tę konwersację?")) return;
                                 try {
                                   const res = await fetch(`${apiUrl}/api/conversations/${c.id}`, {
-                                    method: 'DELETE',
-                                    headers: { "token": token || "" }
+                                    method: "DELETE",
+                                    headers: { token: token || "" },
                                   });
                                   if (res.ok) {
                                     if (currentConversationId === c.id) {
@@ -781,9 +844,13 @@ function App() {
                                     }
                                     fetchRecentConversations();
                                   }
-                                } catch (e) { console.error("Error deleting chat", e); }
+                                } catch (e) {
+                                  console.error("Error deleting chat", e);
+                                }
                               }}
-                            >✕</button>
+                            >
+                              ✕
+                            </button>
                           </div>
                         ))}
                       </div>
@@ -801,15 +868,15 @@ function App() {
                     {chatMessages.map((msg, i) => (
                       <div key={i} className={`message-bubble chat-${msg.role}`}>
                         <div className="bubble-content">
-                          {msg.role === 'ai' ? (
+                          {msg.role === "ai" ? (
                             <div className="ai-message-wrapper">
                               <ReactMarkdown
                                 remarkPlugins={[remarkGfm]}
                                 components={{
                                   code({ node, inline, className, children, ...props }: any) {
-                                    const match = /language-(\w+)/.exec(className || '');
-                                    const language = match ? match[1] : '';
-                                    const codeContent = String(children).replace(/\n$/, '');
+                                    const match = /language-(\w+)/.exec(className || "");
+                                    const language = match ? match[1] : "";
+                                    const codeContent = String(children).replace(/\n$/, "");
 
                                     if (!inline && match) {
                                       return (
@@ -824,7 +891,7 @@ function App() {
                                                 if (btn) {
                                                   const original = btn.innerText;
                                                   btn.innerText = "Skopiowano!";
-                                                  setTimeout(() => btn.innerText = original, 2000);
+                                                  setTimeout(() => (btn.innerText = original), 2000);
                                                 }
                                               }}
                                             >
@@ -842,20 +909,30 @@ function App() {
                                         {children}
                                       </code>
                                     );
-                                  }
+                                  },
                                 }}
                               >
                                 {msg.text}
                               </ReactMarkdown>
                             </div>
                           ) : (
-                            <div className="user-text-wrapper">
-                              {msg.text}
-                            </div>
+                            <div className="user-text-wrapper">{msg.text}</div>
                           )}
                           {msg.sources && msg.sources.length > 0 && (
                             <div className="message-sources">
-                              <small>📁 Źródła: {Array.from(new Set(msg.sources.map((s: any) => s.filename))).join(", ")}</small>
+                              <small>📁 Źródła: </small>
+                              {msg.sources.map((s: any, idx: number) => (
+                                <span key={idx}>
+                                  {s.url ? (
+                                    <a href={s.url} target="_blank" rel="noopener noreferrer" className="source-link">
+                                      {s.title || s.filename}
+                                    </a>
+                                  ) : (
+                                    <span className="source-text">{s.title || s.filename}</span>
+                                  )}
+                                  {idx < msg.sources!.length - 1 ? ", " : ""}
+                                </span>
+                              ))}
                             </div>
                           )}
                         </div>
@@ -864,7 +941,9 @@ function App() {
                     {isQuerying && (
                       <div className="message-bubble chat-ai loading-bubble">
                         <div className="typing-loader">
-                          <span>.</span><span>.</span><span>.</span>
+                          <span>.</span>
+                          <span>.</span>
+                          <span>.</span>
                         </div>
                       </div>
                     )}
@@ -872,14 +951,8 @@ function App() {
                   </div>
 
                   <div className="chat-input-wrapper">
-                    <input
-                      type="file"
-                      id="chat-file-upload"
-                      hidden
-                      onChange={handleFileUpload}
-                      accept=".pdf,.docx,.sql,.txt,.cs,.py,.js"
-                    />
-                    <label className={`chat-upload-btn ${isUploading ? 'loading' : ''}`} title="Wgraj plik do analizy">
+                    <input type="file" id="chat-file-upload" hidden onChange={handleFileUpload} accept=".pdf,.docx,.sql,.txt,.cs,.py,.js" />
+                    <label className={`chat-upload-btn ${isUploading ? "loading" : ""}`} title="Wgraj plik do analizy">
                       {isUploading ? <div className="spinner"></div> : "📎"}
                       <input type="file" onChange={handleFileUpload} disabled={isUploading} hidden />
                     </label>
@@ -889,9 +962,11 @@ function App() {
                       placeholder="Napisz wiadomość..."
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleQuery()}
+                      onKeyDown={(e) => e.key === "Enter" && handleQuery()}
                     />
-                    <button className="chat-send-btn" onClick={handleQuery}>➔</button>
+                    <button className="chat-send-btn" onClick={handleQuery}>
+                      ➔
+                    </button>
                   </div>
                 </div>
               )}
@@ -908,18 +983,24 @@ function App() {
           </div>
           <div className="panel-main">
             <div className="panel-header">
-              <div className="header-tabs"><span className="tab-btn active">Logowanie</span></div>
-              <button className="close-btn" onClick={handleMinimize}>✕</button>
+              <div className="header-tabs">
+                <span className="tab-btn active">Logowanie</span>
+              </div>
+              <button className="close-btn" onClick={handleMinimize}>
+                ✕
+              </button>
             </div>
             <div className="login-container">
               <div className="login-box">
                 <h2>Witamy w ArcusAi</h2>
                 <p>Zaloguj się do swojego konta</p>
                 <form onSubmit={handleLogin} className="login-form">
-                  <input type="text" placeholder="Adres API (np. http://localhost:8000)" value={apiUrl} onChange={e => setApiUrl(e.target.value)} required />
-                  <input type="text" placeholder="Użytkownik" value={loginForm.user} onChange={e => setLoginForm({ ...loginForm, user: e.target.value })} required />
-                  <input type="password" placeholder="Hasło" value={loginForm.pass} onChange={e => setLoginForm({ ...loginForm, pass: e.target.value })} required />
-                  <button type="submit" className="submit-btn login-btn">Zaloguj</button>
+                  <input type="text" placeholder="Adres API (np. http://localhost:8000)" value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} required />
+                  <input type="text" placeholder="Użytkownik" value={loginForm.user} onChange={(e) => setLoginForm({ ...loginForm, user: e.target.value })} required />
+                  <input type="password" placeholder="Hasło" value={loginForm.pass} onChange={(e) => setLoginForm({ ...loginForm, pass: e.target.value })} required />
+                  <button type="submit" className="submit-btn login-btn">
+                    Zaloguj
+                  </button>
                 </form>
               </div>
             </div>

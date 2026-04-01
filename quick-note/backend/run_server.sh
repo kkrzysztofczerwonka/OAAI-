@@ -32,4 +32,4 @@ fi
 echo "[+] Uruchamianie serwera na http://0.0.0.0:8000"
 echo "[+] Aby zatrzymac: Ctrl+C"
 
-python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1

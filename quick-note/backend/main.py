@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -7,14 +7,19 @@ import os
 import shutil
 from datetime import datetime, timedelta
 import google.generativeai as genai
+import time
 from pypdf import PdfReader
 from docx import Document
 import chromadb
+from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
 import jwt
 import bcrypt
 import asyncio
 from bookstack_service import BookStackService
+import traceback
+import re
+from sentence_transformers import SentenceTransformer
 
 # Load .env file
 load_dotenv()
@@ -70,9 +75,24 @@ else:
     print("WARNING: GEMINI_API_KEY not found in environment!")
 sys.stdout.flush()
 
+# Global embedder variable
+_embedder = None
+
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        print("[EMBED] Ładowanie modelu embeddings (Lazy Load)...")
+        try:
+            _embedder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            print("[EMBED] Model załadowany pomyślnie.")
+        except Exception as e:
+            print(f"[EMBED] BŁĄD ładowania modelu: {e}")
+            raise e
+    return _embedder
+
 # Initialize ChromaDB for vector storage
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
-collection = chroma_client.get_or_create_collection(name="knowledge_base")
+collection = chroma_client.get_or_create_collection(name="knowledge_base_local")
 
 # Initialize BookStack
 BOOKSTACK_URL = os.environ.get("BOOKSTACK_URL", "http://192.168.13.12")
@@ -185,6 +205,108 @@ def normalize_text(text: str) -> str:
     return "".join(c for c in unicodedata.normalize('NFD', text)
                    if unicodedata.category(c) != 'Mn')
 
+def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
+    """Split text into manageable chunks for embedding"""
+    if not text: return []
+    # Simple character-based splitting with overlap
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        # Try to find a logical break point (newline or space) near the end
+        if end < len(text):
+            # Look back for a newline or space
+            break_point = -1
+            search_area = text[end-100:end]
+            for sep in ['\n\n', '\n', '. ', ' ']:
+                idx = search_area.rfind(sep)
+                if idx != -1:
+                    break_point = end - 100 + idx + len(sep)
+                    break
+            if break_point != -1:
+                end = break_point
+        
+        chunks.append(text[start:end].strip())
+        start = end - overlap
+        if start >= len(text) - overlap:
+            break
+            
+    return [c for c in chunks if len(c) > 20]
+
+async def process_page_for_vector_db(page_id: int):
+    """Fetch page, chunk it and store embeddings in ChromaDB"""
+    if not bookstack: return
+    try:
+        print(f"[VECTOR] Rozpoczynam przetwarzanie strony ID {page_id}...", flush=True)
+        page = bookstack.get_page(page_id)
+        
+        # Get content
+        m_text = page.get("markdown", "")
+        h_content = page.get("html", "")
+        
+        # Clean HTML properly
+        clean_h = ""
+        if h_content:
+            clean_h = re.sub(r'<(p|br|li|h[1-6]|tr|div|section|article|header|footer|td)[^>]*>', '\n', h_content)
+            clean_h = re.sub(r'<[^>]+>', '', clean_h)
+            clean_h = re.sub(r'\n+', '\n', clean_h).strip()
+
+        # Use the richer content
+        final_text = m_text if len(m_text) > len(clean_h) else clean_h
+        
+        if not final_text or len(final_text.strip()) < 10:
+            print(f"[VECTOR] Strona ID {page_id} jest pusta lub za krótka. Pomijam.")
+            return
+
+        chunks = chunk_text(final_text)
+        
+        # Remove old chunks for this page
+        collection.delete(where={"page_id": page_id})
+        
+        if not chunks: return
+        
+        # Generate embeddings in blocks (or one by one if preferred)
+        # Using models/text-embedding-004
+        ids = []
+        embeddings = []
+        documents = []
+        metadatas = []
+        
+        for i, chunk in enumerate(chunks):
+            try:
+                # Add context (title) to each chunk for better retrieval
+                augmented_chunk = f"Tytuł: {page.get('name')}\n\n{chunk}"
+                
+                # Generowanie wektora lokalnie (za darmo)
+                model = get_embedder()
+                embedding = model.encode(augmented_chunk).tolist()
+                ids.append(f"page_{page_id}_chunk_{i}")
+                embeddings.append(embedding)
+                documents.append(chunk) # Store original chunk text
+                metadatas.append({
+                    "page_id": page_id,
+                    "book_id": page.get("book_id"),
+                    "chapter_id": page.get("chapter_id"),
+                    "title": page.get("name"), 
+                    "chunk_index": i,
+                    "updated_at": datetime.now().isoformat()
+                })
+            except Exception as embed_e:
+                print(f"[VECTOR] Błąd embeddingu dla chunk {i} strony {page_id}: {embed_e}")
+        
+        if ids:
+            collection.add(
+                ids=ids,
+                embeddings=embeddings,
+                documents=documents,
+                metadatas=metadatas
+            )
+            print(f"[VECTOR] Pomyślnie zindeksowano stronę '{page.get('name')}' ({len(ids)} chunków  - LOKALNIE).", flush=True)
+            
+    except Exception as e:
+        print(f"[VECTOR] Błąd przetwarzania strony {page_id}: {e}", flush=True)
+        traceback.print_exc()
+
 # Global Cache for BookStack Structure
 bookstack_structure_cache = None
 last_structure_update = 0
@@ -197,11 +319,13 @@ def get_knowledge_map():
     # Refresh every 30 mins
     if not bookstack_structure_cache or (time.time() - last_structure_update > 1800):
         try:
-            print("[SYNC] Odświeżanie mapy struktury BookStack...")
+            print("[SYNC] Odświeżanie mapy struktury BookStack...", flush=True)
             bookstack_structure_cache = bookstack.get_global_structure()
+
+            bookstack.refresh_map() 
             last_structure_update = time.time()
         except Exception as e:
-            print(f"[ERROR] Nie udało się pobrać struktury: {e}")
+            print(f"[ERROR] Nie udało się pobrać struktury: {e}", flush=True)
             return ""
             
     # Format as list of strings
@@ -330,6 +454,123 @@ async def suggest_metadata(req: SuggestRequest, user=Depends(get_current_user)):
     except Exception as e:
         print(f"Error suggesting metadata: {e}")
         return {"rozwiazanie": "", "podrozwiazanie": "", "produkt": "", "obszar": "", "firma": "", "book_id": None, "chapter_id": None}
+
+@app.post("/api/webhook/bookstack")
+async def bookstack_webhook(request: Request):
+    """Webhook for BookStack events to trigger vector indexing"""
+    try:
+        payload = await request.json()
+        event = payload.get("event")
+        related_item = payload.get("related_item", {})
+        
+        print(f"[WEBHOOK] Otrzymano zdarzenie: {event} dla elementu ID {related_item.get('id')}")
+        
+        if event in ["page_create", "page_update"]:
+            page_id = related_item.get("id")
+            if page_id:
+                # Process in background
+                asyncio.create_task(process_page_for_vector_db(page_id))
+        elif event == "page_delete":
+            page_id = related_item.get("id")
+            if page_id:
+                collection.delete(where={"page_id": page_id})
+                print(f"[VECTOR] Usunięto stronę ID {page_id} z bazy.", flush=True)
+        elif event == "book_delete":
+            book_id = related_item.get("id")
+            if book_id:
+                collection.delete(where={"book_id": book_id})
+                print(f"[VECTOR] Usunięto całą książkę ID {book_id} z bazy.", flush=True)
+        elif event == "chapter_delete":
+            chapter_id = related_item.get("id")
+            if chapter_id:
+                collection.delete(where={"chapter_id": chapter_id})
+                print(f"[VECTOR] Usunięto cały rozdział ID {chapter_id} z bazy.", flush=True)
+                
+        return {"status": "success"}
+    except Exception as e:
+        print(f"[WEBHOOK] Błąd: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/admin/reindex-all")
+async def reindex_all_pages(background_tasks: BackgroundTasks):
+    """Admin endpoint to force reindex all pages from BookStack"""
+    if not bookstack:
+        print("[REINDEX] Błąd: BookStack nie jest skonfigurowany!")
+        return {"error": "BookStack connection not configured"}
+        
+    def run_full_reindex():
+        try:
+            print("[REINDEX] START: Rozpoczynam pełne reindeksowanie..", flush=True)
+            
+            # NOWOŚĆ: Czyścimy całą bazę wektorową przed reindeksacją, żeby pozbyć się "duchów" starych stron
+            if collection.count() > 0:
+                print(f"[REINDEX] Czyszczę bazę z {collection.count()} starych fragmentów...", flush=True)
+                # Ponieważ na razie mamy tylko BookStack, usuwamy wszystko (pobieramy wszystkie ID lub po prostu usuwamy kolekcję)
+                # ChromaDB nie pozwala na delete() bez warunku, więc usuwamy po metadanych lub po prostu pobieramy wszystkie ID
+                all_ids = collection.get()['ids']
+                if all_ids:
+                    collection.delete(ids=all_ids)
+                print("[REINDEX] Baza wyczyszczona. Rozpoczynam pobieranie danych.", flush=True)
+
+            books = bookstack.list_books()
+            print(f"[REINDEX] Znaleziono {len(books)} książek do przetworzenia.")
+            
+            total_pages = 0
+            for book in books:
+                print(f"[REINDEX] Pobieram strony z książki: {book['name']} (ID: {book['id']})")
+                try:
+                    pages = bookstack.list_pages(book_id=book["id"])
+                    print(f"[REINDEX] Książka '{book['name']}' ma {len(pages)} stron.")
+                    
+                    for p in pages:
+                        # Wywołujemy to synchronicznie wewnątrz worker thread-a
+                        try:
+                            # Używamy asyncio.run tylko jeśli nie ma aktywnego loopa w tym wątku
+                            try:
+                                loop = asyncio.get_event_loop()
+                                if loop.is_running():
+                                    # Jeśli jesteśmy w async workerze, odpalamy jako task i czekamy synchronicznie
+                                    coro = process_page_for_vector_db(p["id"])
+                                    asyncio.run_coroutine_threadsafe(coro, loop).result()
+                                else:
+                                    loop.run_until_complete(process_page_for_vector_db(p["id"]))
+                            except RuntimeError:
+                                asyncio.run(process_page_for_vector_db(p["id"]))
+                                
+                            total_pages += 1
+                        except Exception as e:
+                            print(f"[REINDEX] Błąd przy stronie {p.get('id', 'unknown')}: {e}", flush=True)
+                    
+                except Exception as book_e:
+                    print(f"[REINDEX] Błąd przy przetwarzaniu książki {book.get('id')}: {book_e}", flush=True)
+                    
+            print(f"[REINDEX] FINISH: Zakończono! Przetworzono łącznie {total_pages} stron.", flush=True)
+        except Exception as e:
+            print(f"[REINDEX] Błąd krytyczny w zadaniu w tle: {e}", flush=True)
+            traceback.print_exc()
+
+    background_tasks.add_task(run_full_reindex)
+    print("[REINDEX] Zadanie dodane do kolejki BackgroundTasks.", flush=True)
+    return {"status": "started", "message": "Reindeksowanie uruchomione w tle."}
+
+@app.get("/api/admin/debug-page/{page_id}")
+async def debug_page_content(page_id: int):
+    """Debug endpoint to check if a page exists in ChromaDB"""
+    if not collection:
+        return {"error": "Collection not initialized"}
+    
+    # Próbujemy pobrać fragmenty jako int
+    res = collection.get(where={"page_id": page_id})
+    # Próbujemy jako str
+    if not res['documents']:
+        res = collection.get(where={"page_id": str(page_id)})
+        
+    return {
+        "page_id": page_id,
+        "chunk_count": len(res['documents']) if res['documents'] else 0,
+        "titles": [m.get("title") for m in res['metadatas']] if res['metadatas'] else [],
+        "preview": [doc[:100] + "..." for doc in res['documents'][:3]] if res['documents'] else []
+    }
 
 # Endpoints
 @app.post("/api/login")
@@ -481,231 +722,210 @@ async def query_knowledge(req: ChatRequest, user=Depends(get_current_user)):
         # Get latest query
         latest_msg = req.messages[-1]["content"] if req.messages else ""
         if not latest_msg:
-            return {"text": "Nie podano zapytania."}
+            return {"answer": "Nie podano zapytania.", "sources": []}
             
-        print(f"DEBUG: Processing query: '{latest_msg}' with history of {len(req.messages)-1} msgs")
+        print(f"[QUERY] Przetwarzanie pytania: '{latest_msg}'")
         
-        # 0. Get Knowledge Map (Structure)
+        # 0. Get Knowledge Map (Structure) for context
         knowledge_map = get_knowledge_map()
         
-        context = "" # DONT initialize with map, otherwise we can't tell if we found content
+        context = ""
         sources = []
-
-        # 0. Agentic Step: Identify Relevant Pages
-        target_page_ids = []
-        if bookstack and knowledge_map:
-            try:
-                history_str = ""
-                last_mentioned_ids = []
-                for m in req.messages[:-1][-5:]:
-                    role_map = {"user": "Użytkownik", "ai": "AI Assistant"}
-                    history_str += f"{role_map.get(m['role'], m['role'])}: {m['content']}\n"
-                    # Scan for IDs in AI responses
-                    if m['role'] == 'ai':
-                        found = re.findall(r'ID\s*(\d+)', m['content'])
-                        for f_id in found: last_mentioned_ids.append(int(f_id))
-
-                id_prompt = f"""Na podstawie poniższej struktury bazy wiedzy wybierz maksymalnie 4-5 ID najistotniejszych stron, które mogą zawierać odpowiedź na pytanie użytkownika.
-Zwróć TYLKO same numery ID oddzielone przecinkami. Jeśli nic nie pasuje, zwróć: BRAK.
-
-HISTORIA ROZMOWY:
-{history_str}
-
-ZASADA PRIORYTETU:
-1. Jeśli użytkownik używa zaimków jak "ta strona", "ten dokument", "podaj jej treść" - wysoce prawdopodobne, że chodzi o ID wspomniane przez AI w historii ({last_mentioned_ids}). Wybierz je.
-2. W pierwszej kolejności szukaj stron technicznych (notatek użytkowników), które NIE znajdują się w rozdziałach o nazwie 'dokumentacja'.
-3. Jeśli nie znajdziesz nic w notatkach, poszukaj odpowiednich stron w rozdziale 'dokumentacja'. 
-
-STRUKTURA:
-{knowledge_map}
-
-OSTATNIE PYTANIE: {latest_msg}"""
-                
-                id_model = genai.GenerativeModel('gemini-2.5-flash')
-                id_response = id_model.generate_content(id_prompt).text.strip()
-                print(f"DEBUG: Agent ID Response: {id_response}")
-                
-                if "BRAK" not in id_response.upper():
-                    # Extract IDs from response (regex to be safe)
-                    found_ids = re.findall(r'\d+', id_response)
-                    target_page_ids = [int(i) for i in found_ids[:10]]
-                
-                # Check for pronouns in polish to resolve "this page"
-                pronouns = ["tej", "tą", "tę", "tego", "ten", "treść", "szczegóły", "strony", "dokumentu", "instrukcj"]
-                if any(p in latest_msg.lower() for p in pronouns) and last_mentioned_ids:
-                    for l_id in set(last_mentioned_ids):
-                        if l_id not in target_page_ids: 
-                            target_page_ids.insert(0, l_id)
-
-                # NEW: Direct Title Match Fallback (Very reliable)
-                q_words = [w for w in re.split(r'\W+', latest_msg.lower()) if len(w) > 3]
-                if bookstack_structure_cache:
-                    for s in bookstack_structure_cache.get("shelves", []):
-                        for b in s.get("books", []):
-                            for ch in b.get("chapters", []):
-                                for p in ch.get("pages", []):
-                                    # If title is in query or query is in title
-                                    title_clean = p["name"].lower()
-                                    if title_clean in latest_msg.lower() or latest_msg.lower() in title_clean:
-                                        if p["id"] not in target_page_ids:
-                                            target_page_ids.append(p["id"])
-                                    # Or count word matches
-                                    elif sum(1 for w in q_words if w in title_clean) >= 2:
-                                        if p["id"] not in target_page_ids:
-                                            target_page_ids.append(p["id"])
-
-                # Manual shortcut
-                manual_ids = re.findall(r'(?i)ID\s*(\d+)', latest_msg)
-                for m_id in manual_ids:
-                    val = int(m_id)
-                    if val not in target_page_ids: target_page_ids.append(val)
-                        
-                print(f"DEBUG: Final Target IDs: {target_page_ids}")
-            except Exception as e:
-                print(f"ERROR: Agentic ID identification failed: {e}")
-
-        # Fetch Content from Identified Pages
-        fetched_pids = []
-        if target_page_ids:
-            for pid in set(target_page_ids):
-                try:
-                    page_detail = bookstack.get_page(pid)
-                    # Log fetch attempt
-                    with open(os.path.join(os.path.dirname(__file__), "debug_fetch.log"), "a", encoding="utf-8") as df:
-                        df.write(f"[{datetime.now()}] ID {pid} name: {page_detail.get('name')}\n")
-                    
-                    m_text = page_detail.get("markdown", "")
-                    h_content = page_detail.get("html", "")
-                    
-                    # Clean HTML properly: replace structural tags with newlines first
-                    clean_h = ""
-                    if h_content:
-                        # Replace tags that should act as newlines
-                        clean_h = re.sub(r'<(p|br|li|h[1-6]|tr|div|section|article|header|footer|td)[^>]*>', '\n', h_content)
-                        # Remove all other tags
-                        clean_h = re.sub(r'<[^>]+>', '', clean_h)
-                        # Clean up multiple newlines/whitespace
-                        clean_h = re.sub(r'\n+', '\n', clean_h).strip()
-
-                    # Use the longer content
-                    final_text = m_text if len(m_text) > len(clean_h) else clean_h
-                    
-                    if final_text and len(final_text.strip()) > 3:
-                        context += f"\n--- TREŚĆ DOKUMENTU ID {pid} ({page_detail.get('name')}) START ---\n{final_text[:20000]}\n--- TREŚĆ DOKUMENTU ID {pid} KONIEC ---\n"
-                        sources.append(page_detail.get("name"))
-                        fetched_pids.append(pid)
-                except Exception as e:
-                    print(f"ERROR fetching page {pid}: {e}")
-            
-            print(f"DEBUG: Pomyślnie pobrano treść dla ID: {fetched_pids}")
-
-        # 1. Search BookStack (Primary Source)
         extracted_images = []
-        if bookstack:
-            # Clean query for better search results
-            search_query = latest_msg
-            if "?" in search_query:
-                search_query = search_query.split("?")[0].strip()
-            
-            print(f"DEBUG: Searching BookStack with: '{search_query}'")
-            results = bookstack.search(search_query)
-            
-            # If no results and query was long, try word search
-            if not results and len(search_query.split()) > 4:
-                ref_query = " ".join(search_query.split()[:4])
-                print(f"DEBUG: Falling back to refined search: '{ref_query}'")
-                results = bookstack.search(ref_query)
 
-            if results:
-                # Helper to determine if result is documentation
-                def is_documentation(res):
-                    # Check chapter or book name from structure cache if available
-                    pid = res.get("id")
-                    if bookstack_structure_cache:
-                        for s in bookstack_structure_cache.get("shelves", []):
-                            for b in s.get("books", []):
-                                for ch in b.get("chapters", []):
-                                    if ch["name"].lower() == "dokumentacja":
-                                        for p in ch.get("pages", []):
-                                            if p["id"] == pid: return True
-                    return False
-
-                # Take Top 8 results
-                for res in results[:8]:
-                    try:
-                        if res.get("type") == "page":
-                            page_detail = bookstack.get_page(res.get("id"))
-                            
-                            # Prefer Markdown
-                            text_content = page_detail.get("markdown", "")
-                            p_html = page_detail.get("html", "")
-
-                            # Extract images
-                            if p_html:
-                                img_results = re.findall(r'<img[^>]+src="([^">]+)"', p_html)
-                                for img_src in img_results[:3]: 
-                                    if img_src not in [i["src"] for i in extracted_images]:
-                                        extracted_images.append({"src": img_src, "id": len(extracted_images) + 1})
-                            
-                            if not text_content:
-                                if p_html:
-                                    p_text = re.sub(r'<(p|br|li|h[1-6]|tr|div)[^>]*>', '\n', p_html)
-                                    text_content = re.sub('<[^<]+?>', '', p_text)
-                                    text_content = re.sub(r'\n+', '\n', text_content).strip()
-                                else:
-                                    text_content = "Brak treści strony."
-
-                            # Increase character limit to 10000 
-                            snippet_limit = 10000
-                            img_markers = ""
-                            if p_html:
-                                page_imgs = [img for img in extracted_images if img["src"] in p_html]
-                                if page_imgs:
-                                    img_markers = " (" + ", ".join([f"[IMAGE_REF_{img['id']}]" for img in page_imgs]) + ")"
-                            
-                            context += f"\n--- Dokument: {res.get('name')}{img_markers} ---\n{text_content[:snippet_limit]}\n"
-                            sources.append(res.get("name"))
-                    except Exception as e:
-                        print(f"ERROR: Failed to process page {res.get('id')}: {e}")
-                        pass
-                
-        # 2. Fallback to Chroma if empty and exists
-        if not context:
+        # 1. VECTOR SEARCH (Primary)
+        try:
+            # Check if collection has data
             count = collection.count()
             if count > 0:
-                embedding_model = "models/gemini-embedding-001"
-                query_result = genai.embed_content(model=embedding_model, content=q, task_type="retrieval_query")
-                query_embedding = query_result['embedding']
-                results = collection.query(query_embeddings=[query_embedding], n_results=min(3, count))
+                print(f"[VECTOR] Szukam w {count} fragmentach...")
+                # Embed current query
+                model = get_embedder()
+                query_embedding = model.encode(latest_msg).tolist()
+                
+                results = collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=min(150, count) # Wracamy do 150
+                )
+                
                 if results['documents'] and results['documents'][0]:
-                    context = "\n".join(results['documents'][0])
-                    if results.get('metadatas') and results['metadatas'][0]:
-                        sources = [m.get("filename", "nieznany") for m in results['metadatas'][0]]
+                    # 1. GRUPOWANIE I RANKOWANIE STRON (Reranking)
+                    page_scores = {} # page_id -> score
+                    page_metadata = {} # page_id -> meta
+                    
+                    # Czyścimy query_words i bierzemy rdzenie (min. 4 litery) LUB krótkie numery wersji
+                    raw_words = [w.lower() for w in latest_msg.split()]
+                    query_roots = []
+                    for w in raw_words:
+                        if len(w) >= 4:
+                            query_roots.append(w[:4])
+                        elif any(char.isdigit() for char in w): # Zachowujemy krótkie numery typu "7.1"
+                            query_roots.append(w)
+                    
+                    # --- NOWOŚĆ: Przeszukiwanie struktury po rdzeniach tytułów (Z PUNKTACJĄ) ---
+                    forced_scored_ids = {} # p_id -> score
+                    if bookstack and bookstack.all_pages_map:
+                        for p_id, p_info in bookstack.all_pages_map.items():
+                            p_title_lower = p_info.get("name", "").lower()
+                            matches = 0
+                            exact_hits = 0
+                            
+                            for word in raw_words:
+                                if word in p_title_lower:
+                                    exact_hits += 1 # Dokładne trafienie całego słowa (np. "7.1")
+                                    
+                            for root in query_roots:
+                                if root in p_title_lower:
+                                    matches += 1
+                                    
+                            if matches >= 1:
+                                # Punktacja: 
+                                # Trafienie rdzenia = 10 pkt
+                                # Dokładne trafienie pełnego słowa = +50 pkt (Kluczowe dla wersji!)
+                                forced_scored_ids[p_id] = (matches * 10.0) + (exact_hits * 50.0)
+                                
+                    # Sortujemy wymuszone strony po wyniku
+                    forced_sorted = sorted(forced_scored_ids.items(), key=lambda x: x[1], reverse=True)
+                    forced_final_ids = [p[0] for p in forced_sorted[:10]] # Bierzemy Top 10 dopasowań tytułów
+
+                    for i in range(len(results['metadatas'][0])):
+                        meta = results['metadatas'][0][i]
+                        p_id = meta.get("page_id")
+                        p_title = meta.get("title", "").lower()
+                        distance = results['distances'][0][i] if 'distances' in results else 0.5
+                        
+                        if not p_id: continue
+                        
+                        if p_id not in page_scores:
+                            # Startowy wynik oparty na bliskości wektorowej (niższy dystans = lepiej)
+                            page_scores[p_id] = (1.0 - distance)
+                            page_metadata[p_id] = meta
+                            
+                        # BONUS ZA TYTUŁ: Jeśli rdzeń z pytania jest w tytule strony - boost!
+                        title_bonus = 0
+                        for root in query_roots:
+                            if root in p_title:
+                                title_bonus += 2.5 # Jeszcze silniejszy impuls (z 2.0 na 2.5)
+                        
+                        page_scores[p_id] += title_bonus
+
+                    # Wybieramy Top strony po zboostowanym wyniku wektorowym
+                    sorted_pages = sorted(page_scores.items(), key=lambda x: x[1], reverse=True)
+                    top_page_ids = [p[0] for p in sorted_pages[:3]]
+                    
+                    for f_id in reversed(forced_final_ids):
+                        if f_id not in top_page_ids:
+                            top_page_ids.insert(0, f_id)
+                    
+                    top_page_ids = list(dict.fromkeys(top_page_ids))[:3]
+                    
+                    print(f"[QUERY] Wybrane strony do ekspansji: {top_page_ids}", flush=True)
+
+                    seen_page_ids = set()
+                    
+                    # 2. Ekspansja dla wybranych stron
+                    for p_id in top_page_ids:
+                        # Jeśli strona była forsowana, a nie ma jej w metadata z ChromaDB, pobierzemy tytuł z mapy
+                        if p_id in page_metadata:
+                            target_meta = page_metadata[p_id]
+                            p_title = target_meta.get("title", "Dokument")
+                        elif bookstack and str(p_id) in [str(k) for k in bookstack.all_pages_map.keys()]:
+                            p_title = bookstack.all_pages_map[p_id].get("name", "Dokument")
+                        else:
+                            p_title = f"Strona ID {p_id}"
+                        
+                        # Pobieramy fragmenty z bazy wektorowej
+                        full_page_data = collection.get(where={"page_id": p_id})
+                        if not (full_page_data and full_page_data['documents']):
+                            full_page_data = collection.get(where={"page_id": str(p_id)})
+                        
+                        limited_chunks = []
+                        num_chunks = 0
+                        
+                        if full_page_data and full_page_data['documents']:
+                            num_chunks = len(full_page_data['documents'])
+                            print(f"[QUERY] Ekspansja strony ID {p_id} ({p_title}): {num_chunks} fragm.", flush=True)
+                            
+                            # Sortowanie i limitowanie (żeby nie zapchać kontekstu gigantami)
+                            indexed_chunks = []
+                            for idx, doc in enumerate(full_page_data['documents']):
+                                c_idx = full_page_data['metadatas'][idx].get("chunk_index", 0)
+                                indexed_chunks.append((c_idx, doc))
+                            indexed_chunks.sort()
+                            
+                            # Bierzemy max 60 fragmentów (około 20-30 stron tekstu)
+                            limited_chunks = [c[1] for c in indexed_chunks[:60]]
+                        elif bookstack:
+                            # FALLBACK: Jeśli nie ma w bzie wektorowej, dociągamy bezpośrednio z API w locie
+                            try:
+                                print(f"[QUERY] Ekspansja strony ID {p_id} ({p_title}): Pobieranie bezpośrednio z API...", flush=True)
+                                page_detail = bookstack.get_page(p_id)
+                                text_content = re.sub('<[^<]+?>', '', page_detail.get("html", ""))
+                                limited_chunks = [text_content[:20000]] # Bierzemy solidny kawałek tekstu
+                                num_chunks = 1
+                            except Exception as e:
+                                print(f"[QUERY] Błąd pobierania strony {p_id} z API: {e}", flush=True)
+
+                        if limited_chunks:
+                            context += f"\n--- TREŚĆ STRONY: {p_title} (ID {p_id}) ---\n"
+                            context += "\n".join(limited_chunks)
+                            if num_chunks > 60:
+                                context += f"\n[UWAGA: Wyświetlono tylko pierwsze 60 fragmentów tej strony]\n"
+                            context += "\n" + "-"*50 + "\n\n"
+                            seen_page_ids.add(p_id)
+                            
+                            # Dodajemy źródło z linkiem
+                            source_entry = {"title": p_title, "url": f"{BOOKSTACK_URL.rstrip('/')}/pages/{p_id}"}
+                            if source_entry not in sources:
+                                sources.append(source_entry)
+
+                    # 3. Dopisujemy resztę drobnicy z wyników wyszukiwania (jeśli nie były w top 3)
+                    for i, doc in enumerate(results['documents'][0]):
+                        meta = results['metadatas'][0][i]
+                        p_id = meta.get("page_id")
+                        if p_id in seen_page_ids: continue
+                        
+                        p_title = meta.get("title", "Nieznany dokument")
+                        context += f"\n--- Fragment z: {p_title} (ID: {p_id}) ---\n{doc}\n"
+                        # USUNIĘTE: nie dodajemy drobnicy do listy źródeł na dole
+            else:
+                print("[VECTOR] Baza wektorowa jest pusta.")
+        except Exception as vec_e:
+            print(f"[VECTOR] Błąd wyszukiwania wektorowego: {vec_e}")
+
+        # 2. Fallback to direct search if context is still empty
+        if not context and bookstack:
+            print("[QUERY] Fallback do wyszukiwania tekstowego...")
+            results = bookstack.search(latest_msg)
+            for res in results[:3]:
+                if res.get("type") == "page":
+                    try:
+                        page_detail = bookstack.get_page(res.get("id"))
+                        text_content = re.sub('<[^<]+?>', '', page_detail.get("html", ""))
+                        context += f"\n--- Dokument: {res.get('name')} ---\n{text_content[:3000]}\n"
+                        sources.append({"title": res.get('name'), "url": f"{BOOKSTACK_URL.rstrip('/')}/pages/{res.get('id')}"})
+                    except: pass
 
         if not context:
-            return {"answer": "Baza wiedzy (BookStack) jest pusta lub nie znalazłem tam nic o tym.", "sources": []}
+            return {"answer": "Baza wiedzy jest pusta lub nie znalazłem tam nic o tym.", "sources": []}
 
         # 3. Generate response with history
         prompt_with_history = "To jest historia konwersacji (użyj jej jako kontekstu):\n"
-        # Include last 5 messages for context
         for m in req.messages[:-1][-5:]:
             role_map = {"user": "Użytkownik", "ai": "AI Assistant"}
             prompt_with_history += f"{role_map.get(m['role'], m['role'])}: {m['content']}\n"
             
-        prompt_with_history += f"\nOto struktura Twojej Bazy Wiedzy (użyj jej, aby wyjaśnić gdzie leży dokument):\n{knowledge_map}\n\n"
-        prompt_with_history += f"Oto TREŚĆ dokumentów/notatek z Bazy Wiedzy (użyj tego do odpowiedzi na pytanie):\n{context}\n\n"
+        prompt_with_history += f"\nOto struktura Bazy Wiedzy (użyj dla orientacji):\n{knowledge_map}\n\n"
+        prompt_with_history += f"Oto NAJBARDZIEJ TRAFNE FRAGMENTY z Twojej Bazy Wiedzy:\n{context}\n\n"
         prompt_with_history += f"PYTANIE UŻYTKOWNIKA: {latest_msg}\n"
-        prompt_with_history += "Przeanalizuj uważnie dostarczony kontekst. Jeśli zawiera on odpowiedź na pytanie użytkownika, opisz ją dokładnie. Jeśli odnosisz się do obrazka ze źródła, użyj jego znacznika [IMAGE_REF_X]. Odpowiedz profesjonalnie po polsku."
+        prompt_with_history += "Przeanalizuj fragmenty i odpowiedz na pytanie użytkownika. Jeśli fragmenty zawierają rozwiązanie, opisz je dokładnie. Odpowiedz profesjonalnie po polsku."
 
-        # Support for Multimodal Gemini (sending images found in notes)
+        # Multimodal if images found
         parts = [prompt_with_history]
-        
-        # Add actual images as parts for Gemini to 'see'
-        import base64
-        import requests as req_lib # To avoid conflict with BookStack requests
-        
         processed_images = []
-        for img in extracted_images[:4]: 
+        import base64
+        
+        for img in extracted_images[:3]: 
             try:
                 src = img["src"]
                 mime_type = "image/png"
@@ -715,39 +935,69 @@ OSTATNIE PYTANIE: {latest_msg}"""
                     img_data = base64.b64decode(encoded)
                     b64_data = encoded
                 elif src.startswith("http") and bookstack:
-                    print(f"DEBUG: Downloading image for AI: {src}")
                     img_data = bookstack.get_image_content(src)
                     b64_data = base64.b64encode(img_data).decode('utf-8')
-                    # Try to guess mime type from URL or default to png
                     if src.lower().endswith(".jpg") or src.lower().endswith(".jpeg"): mime_type = "image/jpeg"
-                    elif src.lower().endswith(".gif"): mime_type = "image/gif"
-                else:
-                    continue
+                else: continue
 
                 parts.append({"mime_type": mime_type, "data": img_data})
                 img["data_uri"] = f"data:{mime_type};base64,{b64_data}"
                 processed_images.append(img)
-            except Exception as e:
-                print(f"ERROR processing image {img['id']}: {e}")
+            except: pass
+
+        # 3. GENERATION
+        # Use Gemini to generate answer based on context
+        system_instruction = f"""Jesteś ArcusAI, profesjonalnym asystentem IT i ekspertem systemów Comarch (Optima, XL).
+Twoim zadaniem jest udzielanie konkretnych, merytorycznych odpowiedzi na podstawie dostarczonej Bazy Wiedzy.
+
+ZASADY ODPOWIADANIA:
+1. Skup się wyłącznie na faktach zawartych w kontekście. Jeśli w kontekście jest kod SQL lub ścieżka w programie - podaj je dokładnie w blokach kodu.
+2. Formatuje odpowiedź w sposób przejrzysty: używaj nagłówków (##), list punktowych i pogrubień.
+3. Bądź zwięzły i konkretny. Nie lej wody. Odpowiadaj w stylu "Standardowej odpowiedzi AI" (jak ChatGPT/Gemini).
+4. Jeśli informacje są niepełne, otwarcie o tym poinformuj i zasugeruj kontakt z serwisem, ale wykorzystaj wszelkie dostępne poszlaki.
+"""
+        
+        generation_config = {
+            # 0.0 = sztywne fakty, 1.0 = duża kreatywność. Dla systemów IT zalecane 0.1 - 0.3.
+            "temperature": 0.2, 
+            
+            # Prawdopodobieństwo skumulowane - model wybiera słowa, których suma prawdopodobieństwa wynosi X.
+            "top_p": 0.95,
+            
+            # Liczba najbardziej prawdopodobnych słów branych pod uwagę przy generowaniu.
+            "top_k": 40,
+            
+            # Maksymalna długość odpowiedzi (limit tokenów). Zapobiega zbyt długim wypracowaniom.
+            "max_output_tokens": 2048, 
+            
+
+            "stop_sequences": [] 
+        }
 
         try:
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(parts)
-        except Exception as e:
-            print(f"DEBUG: Multimodal attempt failed: {e}. Falling back to text-only...")
+            model = genai.GenerativeModel(
+                model_name='gemini-2.5-flash',
+                system_instruction=system_instruction
+            )
+            response = model.generate_content(
+                parts if len(parts) > 1 else prompt_with_history,
+                generation_config=generation_config
+            )
+        except Exception as gen_err:
+            print(f"[AI] Błąd generowania (próba uproszczona): {gen_err}")
             model = genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(prompt_with_history)
         
         answer = response.text
         
-        # Replace placeholders with Data URI Markdown images
+        # Replace markers with Data URIs in the answer
         for img in processed_images:
             placeholder = f"[IMAGE_REF_{img['id']}]"
             if placeholder in answer:
                 answer = answer.replace(placeholder, f"![Obraz {img['id']}]({img['data_uri']})")
         
-        # Fallback for any other markers the AI might have used
-        answer = re.sub(r'\[IMAGE_REF_\d+\]', '', answer) # Remove leftovers
+        # Clean up any leftover markers
+        answer = re.sub(r'\[IMAGE_REF_\d+\]', '', answer)
         
         # Save to DB
         import json
@@ -755,37 +1005,33 @@ OSTATNIE PYTANIE: {latest_msg}"""
         cursor = conn.cursor()
         
         if not conv_id:
-            # Create new conversation
             title = latest_msg[:50] + "..." if len(latest_msg) > 50 else latest_msg
             cursor.execute("INSERT INTO conversations (user_id, title) VALUES (?, ?)", (user_id, title))
             conv_id = cursor.lastrowid
             
-        # Save User Message
         cursor.execute("INSERT INTO messages (conversation_id, role, content, sources) VALUES (?, ?, ?, ?)",
                        (conv_id, "user", latest_msg, "[]"))
-        # Save AI Message
         cursor.execute("INSERT INTO messages (conversation_id, role, content, sources) VALUES (?, ?, ?, ?)",
                        (conv_id, "ai", answer, json.dumps(sources)))
-        
-        # Legacy log
-        cursor.execute("INSERT INTO query_logs (user_id, query) VALUES (?, ?)", (user_id, latest_msg))
-        
         conn.commit()
         conn.close()
 
-        # Placeholders and image markers
-        for img in extracted_images:
-            real_marker = f"[IMAGE_REF_{img['id']}]"
-            answer = answer.replace(real_marker, f"![Obrazek]({img['src']})")
+        # Usunięcie duplikatów ze źródeł (słowniki nie są hashable, więc nie używamy set())
+        unique_sources = []
+        seen_urls = set()
+        for s in sources:
+            if isinstance(s, dict) and s.get('url'):
+                if s['url'] not in seen_urls:
+                    unique_sources.append(s)
+                    seen_urls.add(s['url'])
+            elif s not in unique_sources: # Fallback dla starych stringów
+                unique_sources.append(s)
 
-        return {"answer": answer, "sources": list(set(sources)), "conversation_id": conv_id}
+        return {"answer": answer, "sources": unique_sources, "conversation_id": conv_id}
     except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg:
-            return {"answer": "", "sources": []}
-        print(f"!!! Error in query: {error_msg}")
+        print(f"!!! Error in query: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Błąd AI: {error_msg}")
+        raise HTTPException(status_code=500, detail=f"Błąd AI: {str(e)}")
 
 @app.get("/api/admin/stats")
 async def get_stats(user=Depends(get_current_user)):
